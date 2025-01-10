@@ -27,7 +27,7 @@ import (
 
 // RecreateTables will recreate the tables for the provided beans using the newly provided bean definition and move all data to that new table
 // WARNING: YOU MUST PROVIDE THE FULL BEAN DEFINITION
-func RecreateTables(beans ...interface{}) func(*xorm.Engine) error {
+func RecreateTables(beans ...any) func(*xorm.Engine) error {
 	return func(x *xorm.Engine) error {
 		sess := x.NewSession()
 		defer sess.Close()
@@ -48,7 +48,7 @@ func RecreateTables(beans ...interface{}) func(*xorm.Engine) error {
 // RecreateTable will recreate the table using the newly provided bean definition and move all data to that new table
 // WARNING: YOU MUST PROVIDE THE FULL BEAN DEFINITION
 // WARNING: YOU MUST COMMIT THE SESSION AT THE END
-func RecreateTable(sess *xorm.Session, bean interface{}) error {
+func RecreateTable(sess *xorm.Session, bean any) error {
 	// TODO: This will not work if there are foreign keys
 
 	tableName := sess.Engine().TableName(bean)
@@ -177,7 +177,6 @@ func RecreateTable(sess *xorm.Session, bean interface{}) error {
 			log.Error("Unable to recreate uniques on table %s. Error: %v", tableName, err)
 			return err
 		}
-
 	case setting.Database.Type.IsMySQL():
 		// MySQL will drop all the constraints on the old table
 		if _, err := sess.Exec(fmt.Sprintf("DROP TABLE `%s`", tableName)); err != nil {
@@ -228,7 +227,6 @@ func RecreateTable(sess *xorm.Session, bean interface{}) error {
 				return err
 			}
 			sequenceMap[sequence] = sequenceData
-
 		}
 
 		// CASCADE causes postgres to drop all the constraints on the old table
@@ -293,9 +291,7 @@ func RecreateTable(sess *xorm.Session, bean interface{}) error {
 					return err
 				}
 			}
-
 		}
-
 	case setting.Database.Type.IsMSSQL():
 		// MSSQL will drop all the constraints on the old table
 		if _, err := sess.Exec(fmt.Sprintf("DROP TABLE `%s`", tableName)); err != nil {
@@ -308,7 +304,6 @@ func RecreateTable(sess *xorm.Session, bean interface{}) error {
 			log.Error("Unable to rename %s to %s. Error: %v", tempTableName, tableName, err)
 			return err
 		}
-
 	default:
 		log.Fatal("Unrecognized DB")
 	}

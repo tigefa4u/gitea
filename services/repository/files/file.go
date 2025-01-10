@@ -17,6 +17,22 @@ import (
 	"code.gitea.io/gitea/modules/util"
 )
 
+func GetFilesResponseFromCommit(ctx context.Context, repo *repo_model.Repository, commit *git.Commit, branch string, treeNames []string) (*api.FilesResponse, error) {
+	files := []*api.ContentsResponse{}
+	for _, file := range treeNames {
+		fileContents, _ := GetContents(ctx, repo, file, branch, false) // ok if fails, then will be nil
+		files = append(files, fileContents)
+	}
+	fileCommitResponse, _ := GetFileCommitResponse(repo, commit) // ok if fails, then will be nil
+	verification := GetPayloadCommitVerification(ctx, commit)
+	filesResponse := &api.FilesResponse{
+		Files:        files,
+		Commit:       fileCommitResponse,
+		Verification: verification,
+	}
+	return filesResponse, nil
+}
+
 // GetFileResponseFromCommit Constructs a FileResponse from a Commit object
 func GetFileResponseFromCommit(ctx context.Context, repo *repo_model.Repository, commit *git.Commit, branch, treeName string) (*api.FileResponse, error) {
 	fileContents, _ := GetContents(ctx, repo, treeName, branch, false) // ok if fails, then will be nil
@@ -28,6 +44,20 @@ func GetFileResponseFromCommit(ctx context.Context, repo *repo_model.Repository,
 		Verification: verification,
 	}
 	return fileResponse, nil
+}
+
+// constructs a FileResponse with the file at the index from FilesResponse
+func GetFileResponseFromFilesResponse(filesResponse *api.FilesResponse, index int) *api.FileResponse {
+	content := &api.ContentsResponse{}
+	if len(filesResponse.Files) > index {
+		content = filesResponse.Files[index]
+	}
+	fileResponse := &api.FileResponse{
+		Content:      content,
+		Commit:       filesResponse.Commit,
+		Verification: filesResponse.Verification,
+	}
+	return fileResponse
 }
 
 // GetFileCommitResponse Constructs a FileCommitResponse from a Commit object
@@ -124,6 +154,25 @@ func GetAuthorAndCommitterUsers(author, committer *IdentityOptions, doer *user_m
 		committerUser = authorUser // No valid committer so use the author as the committer (was set to a valid user above)
 	}
 	return authorUser, committerUser
+}
+
+// ErrFilenameInvalid represents a "FilenameInvalid" kind of error.
+type ErrFilenameInvalid struct {
+	Path string
+}
+
+// IsErrFilenameInvalid checks if an error is an ErrFilenameInvalid.
+func IsErrFilenameInvalid(err error) bool {
+	_, ok := err.(ErrFilenameInvalid)
+	return ok
+}
+
+func (err ErrFilenameInvalid) Error() string {
+	return fmt.Sprintf("path contains a malformed path component [path: %s]", err.Path)
+}
+
+func (err ErrFilenameInvalid) Unwrap() error {
+	return util.ErrInvalidArgument
 }
 
 // CleanUploadFileName Trims a filename and returns empty string if it is a .git directory

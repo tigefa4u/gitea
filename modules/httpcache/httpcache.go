@@ -59,7 +59,7 @@ func checkIfNoneMatchIsValid(req *http.Request, etag string) bool {
 	ifNoneMatch := req.Header.Get("If-None-Match")
 	if len(ifNoneMatch) > 0 {
 		for _, item := range strings.Split(ifNoneMatch, ",") {
-			item = strings.TrimSpace(item)
+			item = strings.TrimPrefix(strings.TrimSpace(item), "W/") // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/ETag#directives
 			if item == etag {
 				return true
 			}
@@ -70,12 +70,13 @@ func checkIfNoneMatchIsValid(req *http.Request, etag string) bool {
 
 // HandleGenericETagTimeCache handles ETag-based caching with Last-Modified caching for a HTTP request.
 // It returns true if the request was handled.
-func HandleGenericETagTimeCache(req *http.Request, w http.ResponseWriter, etag string, lastModified time.Time) (handled bool) {
+func HandleGenericETagTimeCache(req *http.Request, w http.ResponseWriter, etag string, lastModified *time.Time) (handled bool) {
 	if len(etag) > 0 {
 		w.Header().Set("Etag", etag)
 	}
-	if !lastModified.IsZero() {
-		w.Header().Set("Last-Modified", lastModified.Format(http.TimeFormat))
+	if lastModified != nil && !lastModified.IsZero() {
+		// http.TimeFormat required a UTC time, refer to https://pkg.go.dev/net/http#TimeFormat
+		w.Header().Set("Last-Modified", lastModified.UTC().Format(http.TimeFormat))
 	}
 
 	if len(etag) > 0 {
@@ -84,7 +85,7 @@ func HandleGenericETagTimeCache(req *http.Request, w http.ResponseWriter, etag s
 			return true
 		}
 	}
-	if !lastModified.IsZero() {
+	if lastModified != nil && !lastModified.IsZero() {
 		ifModifiedSince := req.Header.Get("If-Modified-Since")
 		if ifModifiedSince != "" {
 			t, err := time.Parse(http.TimeFormat, ifModifiedSince)

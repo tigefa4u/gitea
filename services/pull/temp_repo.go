@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"code.gitea.io/gitea/models"
+	git_model "code.gitea.io/gitea/models/git"
 	issues_model "code.gitea.io/gitea/models/issues"
 	repo_model "code.gitea.io/gitea/models/repo"
 	"code.gitea.io/gitea/modules/git"
@@ -94,7 +94,7 @@ func createTemporaryRepoForPR(ctx context.Context, pr *issues_model.PullRequest)
 	baseRepoPath := pr.BaseRepo.RepoPath()
 	headRepoPath := pr.HeadRepo.RepoPath()
 
-	if err := git.InitRepository(ctx, tmpBasePath, false); err != nil {
+	if err := git.InitRepository(ctx, tmpBasePath, false, pr.BaseRepo.ObjectFormatName); err != nil {
 		log.Error("Unable to init tmpBasePath for %-v: %v", pr, err)
 		cancel()
 		return nil, nil, err
@@ -104,7 +104,7 @@ func createTemporaryRepoForPR(ctx context.Context, pr *issues_model.PullRequest)
 	baseBranch := "base"
 
 	fetchArgs := git.TrustedCmdArgs{"--no-tags"}
-	if git.CheckGitVersionAtLeast("2.25.0") == nil {
+	if git.DefaultFeatures().CheckVersionAtLeast("2.25.0") {
 		// Writing the commit graph can be slow and is not needed here
 		fetchArgs = append(fetchArgs, "--no-write-commit-graph")
 	}
@@ -168,11 +168,12 @@ func createTemporaryRepoForPR(ctx context.Context, pr *issues_model.PullRequest)
 	}
 
 	trackingBranch := "tracking"
+	objectFormat := git.ObjectFormatFromName(pr.BaseRepo.ObjectFormatName)
 	// Fetch head branch
 	var headBranch string
 	if pr.Flow == issues_model.PullRequestFlowGithub {
 		headBranch = git.BranchPrefix + pr.HeadBranch
-	} else if len(pr.HeadCommitID) == git.SHAFullLength { // for not created pull request
+	} else if len(pr.HeadCommitID) == objectFormat.FullLength() { // for not created pull request
 		headBranch = pr.HeadCommitID
 	} else {
 		headBranch = pr.GetGitRefName()
@@ -181,7 +182,7 @@ func createTemporaryRepoForPR(ctx context.Context, pr *issues_model.PullRequest)
 		Run(prCtx.RunOpts()); err != nil {
 		cancel()
 		if !git.IsBranchExist(ctx, pr.HeadRepo.RepoPath(), pr.HeadBranch) {
-			return nil, nil, models.ErrBranchDoesNotExist{
+			return nil, nil, git_model.ErrBranchNotExist{
 				BranchName: pr.HeadBranch,
 			}
 		}

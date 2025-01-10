@@ -20,7 +20,7 @@ import (
 	"code.gitea.io/gitea/modules/proxy"
 	"code.gitea.io/gitea/modules/structs"
 
-	"github.com/google/go-github/v51/github"
+	"github.com/google/go-github/v61/github"
 	"golang.org/x/oauth2"
 )
 
@@ -135,7 +135,7 @@ func (g *GithubDownloaderV3) LogString() string {
 func (g *GithubDownloaderV3) addClient(client *http.Client, baseURL string) {
 	githubClient := github.NewClient(client)
 	if baseURL != "https://github.com" {
-		githubClient, _ = github.NewEnterpriseClient(baseURL, baseURL, client)
+		githubClient, _ = github.NewClient(client).WithEnterpriseURLs(baseURL, baseURL)
 	}
 	g.clients = append(g.clients, githubClient)
 	g.rates = append(g.rates, nil)
@@ -168,14 +168,14 @@ func (g *GithubDownloaderV3) waitAndPickClient() {
 
 		err := g.RefreshRate()
 		if err != nil {
-			log.Error("g.getClient().RateLimits: %s", err)
+			log.Error("g.getClient().RateLimit.Get: %s", err)
 		}
 	}
 }
 
 // RefreshRate update the current rate (doesn't count in rate limit)
 func (g *GithubDownloaderV3) RefreshRate() error {
-	rates, _, err := g.getClient().RateLimits(g.ctx)
+	rates, _, err := g.getClient().RateLimit.Get(g.ctx)
 	if err != nil {
 		// if rate limit is not enabled, ignore it
 		if strings.Contains(err.Error(), "404") {
@@ -256,11 +256,11 @@ func (g *GithubDownloaderV3) GetMilestones() ([]*base.Milestone, error) {
 			milestones = append(milestones, &base.Milestone{
 				Title:       m.GetTitle(),
 				Description: m.GetDescription(),
-				Deadline:    convertGithubTimestampToTime(m.DueOn),
+				Deadline:    m.DueOn.GetTime(),
 				State:       state,
 				Created:     m.GetCreatedAt().Time,
-				Updated:     convertGithubTimestampToTime(m.UpdatedAt),
-				Closed:      convertGithubTimestampToTime(m.ClosedAt),
+				Updated:     m.UpdatedAt.GetTime(),
+				Closed:      m.ClosedAt.GetTime(),
 			})
 		}
 		if len(ms) < perPage {
@@ -487,7 +487,7 @@ func (g *GithubDownloaderV3) GetIssues(page, perPage int) ([]*base.Issue, bool, 
 			Updated:      issue.GetUpdatedAt().Time,
 			Labels:       labels,
 			Reactions:    reactions,
-			Closed:       &issue.ClosedAt.Time,
+			Closed:       issue.ClosedAt.GetTime(),
 			IsLocked:     issue.GetLocked(),
 			Assignees:    assignees,
 			ForeignIndex: int64(*issue.Number),
@@ -715,11 +715,11 @@ func (g *GithubDownloaderV3) GetPullRequests(page, perPage int) ([]*base.PullReq
 			State:          pr.GetState(),
 			Created:        pr.GetCreatedAt().Time,
 			Updated:        pr.GetUpdatedAt().Time,
-			Closed:         convertGithubTimestampToTime(pr.ClosedAt),
+			Closed:         pr.ClosedAt.GetTime(),
 			Labels:         labels,
 			Merged:         pr.MergedAt != nil,
 			MergeCommitSHA: pr.GetMergeCommitSHA(),
-			MergedTime:     convertGithubTimestampToTime(pr.MergedAt),
+			MergedTime:     pr.MergedAt.GetTime(),
 			IsLocked:       pr.ActiveLockReason != nil,
 			Head: base.PullRequestBranch{
 				Ref:       pr.GetHead().GetRef(),
@@ -737,6 +737,7 @@ func (g *GithubDownloaderV3) GetPullRequests(page, perPage int) ([]*base.PullReq
 			PatchURL:     pr.GetPatchURL(), // see below for SECURITY related issues here
 			Reactions:    reactions,
 			ForeignIndex: int64(*pr.Number),
+			IsDraft:      pr.GetDraft(),
 		})
 
 		// SECURITY: Ensure that the PR is safe
@@ -877,11 +878,4 @@ func (g *GithubDownloaderV3) GetReviews(reviewable base.Reviewable) ([]*base.Rev
 		opt.Page = resp.NextPage
 	}
 	return allReviews, nil
-}
-
-func convertGithubTimestampToTime(t *github.Timestamp) *time.Time {
-	if t == nil {
-		return nil
-	}
-	return &t.Time
 }

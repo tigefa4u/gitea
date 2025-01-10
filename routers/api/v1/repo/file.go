@@ -11,15 +11,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path"
+	"strings"
 	"time"
 
-	"code.gitea.io/gitea/models"
 	git_model "code.gitea.io/gitea/models/git"
 	repo_model "code.gitea.io/gitea/models/repo"
 	"code.gitea.io/gitea/models/unit"
-	"code.gitea.io/gitea/modules/context"
 	"code.gitea.io/gitea/modules/git"
+	"code.gitea.io/gitea/modules/gitrepo"
 	"code.gitea.io/gitea/modules/httpcache"
 	"code.gitea.io/gitea/modules/lfs"
 	"code.gitea.io/gitea/modules/log"
@@ -28,6 +27,8 @@ import (
 	api "code.gitea.io/gitea/modules/structs"
 	"code.gitea.io/gitea/modules/web"
 	"code.gitea.io/gitea/routers/common"
+	"code.gitea.io/gitea/services/context"
+	pull_service "code.gitea.io/gitea/services/pull"
 	archiver_service "code.gitea.io/gitea/services/repository/archiver"
 	files_service "code.gitea.io/gitea/services/repository/files"
 )
@@ -40,7 +41,7 @@ func GetRawFile(ctx *context.APIContext) {
 	// ---
 	// summary: Get a file from a repository
 	// produces:
-	// - application/json
+	// - application/octet-stream
 	// parameters:
 	// - name: owner
 	//   in: path
@@ -54,17 +55,19 @@ func GetRawFile(ctx *context.APIContext) {
 	//   required: true
 	// - name: filepath
 	//   in: path
-	//   description: filepath of the file to get
+	//   description: path of the file to get, it should be "{ref}/{filepath}". If there is no ref could be inferred, it will be treated as the default branch
 	//   type: string
 	//   required: true
 	// - name: ref
 	//   in: query
-	//   description: "The name of the commit/branch/tag. Default the repository’s default branch (usually master)"
+	//   description: "The name of the commit/branch/tag. Default the repository’s default branch"
 	//   type: string
 	//   required: false
 	// responses:
 	//   200:
 	//     description: Returns raw file content.
+	//     schema:
+	//       type: file
 	//   "404":
 	//     "$ref": "#/responses/notFound"
 
@@ -90,6 +93,8 @@ func GetRawFileOrLFS(ctx *context.APIContext) {
 	// swagger:operation GET /repos/{owner}/{repo}/media/{filepath} repository repoGetRawFileOrLFS
 	// ---
 	// summary: Get a file or it's LFS object from a repository
+	// produces:
+	// - application/octet-stream
 	// parameters:
 	// - name: owner
 	//   in: path
@@ -103,17 +108,19 @@ func GetRawFileOrLFS(ctx *context.APIContext) {
 	//   required: true
 	// - name: filepath
 	//   in: path
-	//   description: filepath of the file to get
+	//   description: path of the file to get, it should be "{ref}/{filepath}". If there is no ref could be inferred, it will be treated as the default branch
 	//   type: string
 	//   required: true
 	// - name: ref
 	//   in: query
-	//   description: "The name of the commit/branch/tag. Default the repository’s default branch (usually master)"
+	//   description: "The name of the commit/branch/tag. Default the repository’s default branch"
 	//   type: string
 	//   required: false
 	// responses:
 	//   200:
 	//     description: Returns raw file content.
+	//     schema:
+	//       type: file
 	//   "404":
 	//     "$ref": "#/responses/notFound"
 
@@ -143,7 +150,7 @@ func GetRawFileOrLFS(ctx *context.APIContext) {
 		return
 	}
 
-	// OK, now the blob is known to have at most 1024 bytes we can simply read this in in one go (This saves reading it twice)
+	// OK, now the blob is known to have at most 1024 bytes we can simply read this in one go (This saves reading it twice)
 	dataRc, err := blob.DataAsync()
 	if err != nil {
 		ctx.ServerError("DataAsync", err)
@@ -181,7 +188,7 @@ func GetRawFileOrLFS(ctx *context.APIContext) {
 	meta, err := git_model.GetLFSMetaObjectByOid(ctx, ctx.Repo.Repository.ID, pointer.Oid)
 
 	// If there isn't one, just serve the data directly
-	if err == git_model.ErrLFSObjectNotExist {
+	if errors.Is(err, git_model.ErrLFSObjectNotExist) {
 		// Handle caching for the blob SHA (not the LFS object OID)
 		if httpcache.HandleGenericETagTimeCache(ctx.Req, ctx.Resp, `"`+blob.ID.String()+`"`, lastModified) {
 			return
@@ -199,9 +206,9 @@ func GetRawFileOrLFS(ctx *context.APIContext) {
 		return
 	}
 
-	if setting.LFS.ServeDirect {
+	if setting.LFS.Storage.ServeDirect() {
 		// If we have a signed url (S3, object storage), redirect to this directly.
-		u, err := storage.LFS.URL(pointer.RelativePath(), blob.Name())
+		u, err := storage.LFS.URL(pointer.RelativePath(), blob.Name(), nil)
 		if u != nil && err == nil {
 			ctx.Redirect(u.String())
 			return
@@ -218,7 +225,7 @@ func GetRawFileOrLFS(ctx *context.APIContext) {
 	common.ServeContentByReadSeeker(ctx.Base, ctx.Repo.TreePath, lastModified, lfsDataRc)
 }
 
-func getBlobForEntry(ctx *context.APIContext) (blob *git.Blob, entry *git.TreeEntry, lastModified time.Time) {
+func getBlobForEntry(ctx *context.APIContext) (blob *git.Blob, entry *git.TreeEntry, lastModified *time.Time) {
 	entry, err := ctx.Repo.Commit.GetTreeEntryByPath(ctx.Repo.TreePath)
 	if err != nil {
 		if git.IsErrNotExist(err) {
@@ -226,27 +233,22 @@ func getBlobForEntry(ctx *context.APIContext) (blob *git.Blob, entry *git.TreeEn
 		} else {
 			ctx.Error(http.StatusInternalServerError, "GetTreeEntryByPath", err)
 		}
-		return
+		return nil, nil, nil
 	}
 
 	if entry.IsDir() || entry.IsSubModule() {
 		ctx.NotFound("getBlobForEntry", nil)
-		return
+		return nil, nil, nil
 	}
 
-	info, _, err := git.Entries([]*git.TreeEntry{entry}).GetCommitsInfo(ctx, ctx.Repo.Commit, path.Dir("/" + ctx.Repo.TreePath)[1:])
+	latestCommit, err := ctx.Repo.GitRepo.GetTreePathLatestCommit(ctx.Repo.Commit.ID.String(), ctx.Repo.TreePath)
 	if err != nil {
-		ctx.Error(http.StatusInternalServerError, "GetCommitsInfo", err)
-		return
+		ctx.Error(http.StatusInternalServerError, "GetTreePathLatestCommit", err)
+		return nil, nil, nil
 	}
+	when := &latestCommit.Committer.When
 
-	if len(info) == 1 {
-		// Not Modified
-		lastModified = info[0].Commit.Committer.When
-	}
-	blob = entry.Blob()
-
-	return blob, entry, lastModified
+	return entry.Blob(), entry, when
 }
 
 // GetArchive get archive of a repository
@@ -278,23 +280,27 @@ func GetArchive(ctx *context.APIContext) {
 	//   "404":
 	//     "$ref": "#/responses/notFound"
 
-	repoPath := repo_model.RepoPath(ctx.Params(":username"), ctx.Params(":reponame"))
 	if ctx.Repo.GitRepo == nil {
-		gitRepo, err := git.OpenRepository(ctx, repoPath)
+		var err error
+		ctx.Repo.GitRepo, err = gitrepo.RepositoryFromRequestContextOrOpen(ctx, ctx.Repo.Repository)
 		if err != nil {
 			ctx.Error(http.StatusInternalServerError, "OpenRepository", err)
 			return
 		}
-		ctx.Repo.GitRepo = gitRepo
-		defer gitRepo.Close()
 	}
 
 	archiveDownload(ctx)
 }
 
 func archiveDownload(ctx *context.APIContext) {
-	uri := ctx.Params("*")
-	aReq, err := archiver_service.NewRequest(ctx.Repo.Repository.ID, ctx.Repo.GitRepo, uri)
+	uri := ctx.PathParam("*")
+	ext, tp, err := archiver_service.ParseFileName(uri)
+	if err != nil {
+		ctx.Error(http.StatusBadRequest, "ParseFileName", err)
+		return
+	}
+
+	aReq, err := archiver_service.NewRequest(ctx.Repo.Repository.ID, ctx.Repo.GitRepo, strings.TrimSuffix(uri, ext), tp)
 	if err != nil {
 		if errors.Is(err, archiver_service.ErrUnknownArchiveFormat{}) {
 			ctx.Error(http.StatusBadRequest, "unknown archive format", err)
@@ -318,10 +324,19 @@ func archiveDownload(ctx *context.APIContext) {
 func download(ctx *context.APIContext, archiveName string, archiver *repo_model.RepoArchiver) {
 	downloadName := ctx.Repo.Repository.Name + "-" + archiveName
 
+	// Add nix format link header so tarballs lock correctly:
+	// https://github.com/nixos/nix/blob/56763ff918eb308db23080e560ed2ea3e00c80a7/doc/manual/src/protocols/tarball-fetcher.md
+	ctx.Resp.Header().Add("Link", fmt.Sprintf(`<%s/archive/%s.%s?rev=%s>; rel="immutable"`,
+		ctx.Repo.Repository.APIURL(),
+		archiver.CommitID,
+		archiver.Type.String(),
+		archiver.CommitID,
+	))
+
 	rPath := archiver.RelativePath()
-	if setting.RepoArchive.ServeDirect {
+	if setting.RepoArchive.Storage.ServeDirect() {
 		// If we have a signed url (S3, object storage), redirect to this directly.
-		u, err := storage.RepoArchives.URL(rPath, downloadName)
+		u, err := storage.RepoArchives.URL(rPath, downloadName, nil)
 		if u != nil && err == nil {
 			ctx.Redirect(u.String())
 			return
@@ -386,7 +401,7 @@ func GetEditorconfig(ctx *context.APIContext) {
 		return
 	}
 
-	fileName := ctx.Params("filename")
+	fileName := ctx.PathParam("filename")
 	def, err := ec.GetDefinitionForFilename(fileName)
 	if def == nil {
 		ctx.NotFound(err)
@@ -397,7 +412,7 @@ func GetEditorconfig(ctx *context.APIContext) {
 
 // canWriteFiles returns true if repository is editable and user has proper access level.
 func canWriteFiles(ctx *context.APIContext, branch string) bool {
-	return ctx.Repo.CanWriteToBranch(ctx.Doer, branch) &&
+	return ctx.Repo.CanWriteToBranch(ctx, ctx.Doer, branch) &&
 		!ctx.Repo.Repository.IsMirror &&
 		!ctx.Repo.Repository.IsArchived
 }
@@ -405,6 +420,111 @@ func canWriteFiles(ctx *context.APIContext, branch string) bool {
 // canReadFiles returns true if repository is readable and user has proper access level.
 func canReadFiles(r *context.Repository) bool {
 	return r.Permission.CanRead(unit.TypeCode)
+}
+
+func base64Reader(s string) (io.ReadSeeker, error) {
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.NewReader(b), nil
+}
+
+// ChangeFiles handles API call for modifying multiple files
+func ChangeFiles(ctx *context.APIContext) {
+	// swagger:operation POST /repos/{owner}/{repo}/contents repository repoChangeFiles
+	// ---
+	// summary: Modify multiple files in a repository
+	// consumes:
+	// - application/json
+	// produces:
+	// - application/json
+	// parameters:
+	// - name: owner
+	//   in: path
+	//   description: owner of the repo
+	//   type: string
+	//   required: true
+	// - name: repo
+	//   in: path
+	//   description: name of the repo
+	//   type: string
+	//   required: true
+	// - name: body
+	//   in: body
+	//   required: true
+	//   schema:
+	//     "$ref": "#/definitions/ChangeFilesOptions"
+	// responses:
+	//   "201":
+	//     "$ref": "#/responses/FilesResponse"
+	//   "403":
+	//     "$ref": "#/responses/error"
+	//   "404":
+	//     "$ref": "#/responses/notFound"
+	//   "422":
+	//     "$ref": "#/responses/error"
+	//   "423":
+	//     "$ref": "#/responses/repoArchivedError"
+
+	apiOpts := web.GetForm(ctx).(*api.ChangeFilesOptions)
+
+	if apiOpts.BranchName == "" {
+		apiOpts.BranchName = ctx.Repo.Repository.DefaultBranch
+	}
+
+	var files []*files_service.ChangeRepoFile
+	for _, file := range apiOpts.Files {
+		contentReader, err := base64Reader(file.ContentBase64)
+		if err != nil {
+			ctx.Error(http.StatusUnprocessableEntity, "Invalid base64 content", err)
+			return
+		}
+		changeRepoFile := &files_service.ChangeRepoFile{
+			Operation:     file.Operation,
+			TreePath:      file.Path,
+			FromTreePath:  file.FromPath,
+			ContentReader: contentReader,
+			SHA:           file.SHA,
+		}
+		files = append(files, changeRepoFile)
+	}
+
+	opts := &files_service.ChangeRepoFilesOptions{
+		Files:     files,
+		Message:   apiOpts.Message,
+		OldBranch: apiOpts.BranchName,
+		NewBranch: apiOpts.NewBranchName,
+		Committer: &files_service.IdentityOptions{
+			Name:  apiOpts.Committer.Name,
+			Email: apiOpts.Committer.Email,
+		},
+		Author: &files_service.IdentityOptions{
+			Name:  apiOpts.Author.Name,
+			Email: apiOpts.Author.Email,
+		},
+		Dates: &files_service.CommitDateOptions{
+			Author:    apiOpts.Dates.Author,
+			Committer: apiOpts.Dates.Committer,
+		},
+		Signoff: apiOpts.Signoff,
+	}
+	if opts.Dates.Author.IsZero() {
+		opts.Dates.Author = time.Now()
+	}
+	if opts.Dates.Committer.IsZero() {
+		opts.Dates.Committer = time.Now()
+	}
+
+	if opts.Message == "" {
+		opts.Message = changeFilesCommitMessage(ctx, files)
+	}
+
+	if filesResponse, err := createOrUpdateFiles(ctx, opts); err != nil {
+		handleCreateOrUpdateFileError(ctx, err)
+	} else {
+		ctx.JSON(http.StatusCreated, filesResponse)
+	}
 }
 
 // CreateFile handles API call for creating a file
@@ -446,6 +566,8 @@ func CreateFile(ctx *context.APIContext) {
 	//     "$ref": "#/responses/notFound"
 	//   "422":
 	//     "$ref": "#/responses/error"
+	//   "423":
+	//     "$ref": "#/responses/repoArchivedError"
 
 	apiOpts := web.GetForm(ctx).(*api.CreateFileOptions)
 
@@ -453,11 +575,21 @@ func CreateFile(ctx *context.APIContext) {
 		apiOpts.BranchName = ctx.Repo.Repository.DefaultBranch
 	}
 
-	opts := &files_service.UpdateRepoFileOptions{
-		Content:   apiOpts.Content,
-		IsNewFile: true,
+	contentReader, err := base64Reader(apiOpts.ContentBase64)
+	if err != nil {
+		ctx.Error(http.StatusUnprocessableEntity, "Invalid base64 content", err)
+		return
+	}
+
+	opts := &files_service.ChangeRepoFilesOptions{
+		Files: []*files_service.ChangeRepoFile{
+			{
+				Operation:     "create",
+				TreePath:      ctx.PathParam("*"),
+				ContentReader: contentReader,
+			},
+		},
 		Message:   apiOpts.Message,
-		TreePath:  ctx.Params("*"),
 		OldBranch: apiOpts.BranchName,
 		NewBranch: apiOpts.NewBranchName,
 		Committer: &files_service.IdentityOptions{
@@ -482,12 +614,13 @@ func CreateFile(ctx *context.APIContext) {
 	}
 
 	if opts.Message == "" {
-		opts.Message = ctx.Tr("repo.editor.add", opts.TreePath)
+		opts.Message = changeFilesCommitMessage(ctx, opts.Files)
 	}
 
-	if fileResponse, err := createOrUpdateFile(ctx, opts); err != nil {
+	if filesResponse, err := createOrUpdateFiles(ctx, opts); err != nil {
 		handleCreateOrUpdateFileError(ctx, err)
 	} else {
+		fileResponse := files_service.GetFileResponseFromFilesResponse(filesResponse, 0)
 		ctx.JSON(http.StatusCreated, fileResponse)
 	}
 }
@@ -531,24 +664,37 @@ func UpdateFile(ctx *context.APIContext) {
 	//     "$ref": "#/responses/notFound"
 	//   "422":
 	//     "$ref": "#/responses/error"
+	//   "423":
+	//     "$ref": "#/responses/repoArchivedError"
 	apiOpts := web.GetForm(ctx).(*api.UpdateFileOptions)
 	if ctx.Repo.Repository.IsEmpty {
 		ctx.Error(http.StatusUnprocessableEntity, "RepoIsEmpty", fmt.Errorf("repo is empty"))
+		return
 	}
 
 	if apiOpts.BranchName == "" {
 		apiOpts.BranchName = ctx.Repo.Repository.DefaultBranch
 	}
 
-	opts := &files_service.UpdateRepoFileOptions{
-		Content:      apiOpts.Content,
-		SHA:          apiOpts.SHA,
-		IsNewFile:    false,
-		Message:      apiOpts.Message,
-		FromTreePath: apiOpts.FromPath,
-		TreePath:     ctx.Params("*"),
-		OldBranch:    apiOpts.BranchName,
-		NewBranch:    apiOpts.NewBranchName,
+	contentReader, err := base64Reader(apiOpts.ContentBase64)
+	if err != nil {
+		ctx.Error(http.StatusUnprocessableEntity, "Invalid base64 content", err)
+		return
+	}
+
+	opts := &files_service.ChangeRepoFilesOptions{
+		Files: []*files_service.ChangeRepoFile{
+			{
+				Operation:     "update",
+				ContentReader: contentReader,
+				SHA:           apiOpts.SHA,
+				FromTreePath:  apiOpts.FromPath,
+				TreePath:      ctx.PathParam("*"),
+			},
+		},
+		Message:   apiOpts.Message,
+		OldBranch: apiOpts.BranchName,
+		NewBranch: apiOpts.NewBranchName,
 		Committer: &files_service.IdentityOptions{
 			Name:  apiOpts.Committer.Name,
 			Email: apiOpts.Committer.Email,
@@ -571,27 +717,28 @@ func UpdateFile(ctx *context.APIContext) {
 	}
 
 	if opts.Message == "" {
-		opts.Message = ctx.Tr("repo.editor.update", opts.TreePath)
+		opts.Message = changeFilesCommitMessage(ctx, opts.Files)
 	}
 
-	if fileResponse, err := createOrUpdateFile(ctx, opts); err != nil {
+	if filesResponse, err := createOrUpdateFiles(ctx, opts); err != nil {
 		handleCreateOrUpdateFileError(ctx, err)
 	} else {
+		fileResponse := files_service.GetFileResponseFromFilesResponse(filesResponse, 0)
 		ctx.JSON(http.StatusOK, fileResponse)
 	}
 }
 
 func handleCreateOrUpdateFileError(ctx *context.APIContext, err error) {
-	if models.IsErrUserCannotCommit(err) || models.IsErrFilePathProtected(err) {
+	if files_service.IsErrUserCannotCommit(err) || pull_service.IsErrFilePathProtected(err) {
 		ctx.Error(http.StatusForbidden, "Access", err)
 		return
 	}
-	if models.IsErrBranchAlreadyExists(err) || models.IsErrFilenameInvalid(err) || models.IsErrSHADoesNotMatch(err) ||
-		models.IsErrFilePathInvalid(err) || models.IsErrRepoFileAlreadyExists(err) {
+	if git_model.IsErrBranchAlreadyExists(err) || files_service.IsErrFilenameInvalid(err) || pull_service.IsErrSHADoesNotMatch(err) ||
+		files_service.IsErrFilePathInvalid(err) || files_service.IsErrRepoFileAlreadyExists(err) {
 		ctx.Error(http.StatusUnprocessableEntity, "Invalid", err)
 		return
 	}
-	if models.IsErrBranchDoesNotExist(err) || git.IsErrBranchNotExist(err) {
+	if git_model.IsErrBranchNotExist(err) || git.IsErrBranchNotExist(err) {
 		ctx.Error(http.StatusNotFound, "BranchDoesNotExist", err)
 		return
 	}
@@ -600,7 +747,7 @@ func handleCreateOrUpdateFileError(ctx *context.APIContext, err error) {
 }
 
 // Called from both CreateFile or UpdateFile to handle both
-func createOrUpdateFile(ctx *context.APIContext, opts *files_service.UpdateRepoFileOptions) (*api.FileResponse, error) {
+func createOrUpdateFiles(ctx *context.APIContext, opts *files_service.ChangeRepoFilesOptions) (*api.FilesResponse, error) {
 	if !canWriteFiles(ctx, opts.OldBranch) {
 		return nil, repo_model.ErrUserDoesNotHaveAccessToRepo{
 			UserID:   ctx.Doer.ID,
@@ -608,13 +755,37 @@ func createOrUpdateFile(ctx *context.APIContext, opts *files_service.UpdateRepoF
 		}
 	}
 
-	content, err := base64.StdEncoding.DecodeString(opts.Content)
-	if err != nil {
-		return nil, err
-	}
-	opts.Content = string(content)
+	return files_service.ChangeRepoFiles(ctx, ctx.Repo.Repository, ctx.Doer, opts)
+}
 
-	return files_service.CreateOrUpdateRepoFile(ctx, ctx.Repo.Repository, ctx.Doer, opts)
+// format commit message if empty
+func changeFilesCommitMessage(ctx *context.APIContext, files []*files_service.ChangeRepoFile) string {
+	var (
+		createFiles []string
+		updateFiles []string
+		deleteFiles []string
+	)
+	for _, file := range files {
+		switch file.Operation {
+		case "create":
+			createFiles = append(createFiles, file.TreePath)
+		case "update":
+			updateFiles = append(updateFiles, file.TreePath)
+		case "delete":
+			deleteFiles = append(deleteFiles, file.TreePath)
+		}
+	}
+	message := ""
+	if len(createFiles) != 0 {
+		message += ctx.Locale.TrString("repo.editor.add", strings.Join(createFiles, ", ")+"\n")
+	}
+	if len(updateFiles) != 0 {
+		message += ctx.Locale.TrString("repo.editor.update", strings.Join(updateFiles, ", ")+"\n")
+	}
+	if len(deleteFiles) != 0 {
+		message += ctx.Locale.TrString("repo.editor.delete", strings.Join(deleteFiles, ", "))
+	}
+	return strings.Trim(message, "\n")
 }
 
 // DeleteFile Delete a file in a repository
@@ -656,6 +827,8 @@ func DeleteFile(ctx *context.APIContext) {
 	//     "$ref": "#/responses/error"
 	//   "404":
 	//     "$ref": "#/responses/error"
+	//   "423":
+	//     "$ref": "#/responses/repoArchivedError"
 
 	apiOpts := web.GetForm(ctx).(*api.DeleteFileOptions)
 	if !canWriteFiles(ctx, apiOpts.BranchName) {
@@ -670,12 +843,17 @@ func DeleteFile(ctx *context.APIContext) {
 		apiOpts.BranchName = ctx.Repo.Repository.DefaultBranch
 	}
 
-	opts := &files_service.DeleteRepoFileOptions{
+	opts := &files_service.ChangeRepoFilesOptions{
+		Files: []*files_service.ChangeRepoFile{
+			{
+				Operation: "delete",
+				SHA:       apiOpts.SHA,
+				TreePath:  ctx.PathParam("*"),
+			},
+		},
 		Message:   apiOpts.Message,
 		OldBranch: apiOpts.BranchName,
 		NewBranch: apiOpts.NewBranchName,
-		SHA:       apiOpts.SHA,
-		TreePath:  ctx.Params("*"),
 		Committer: &files_service.IdentityOptions{
 			Name:  apiOpts.Committer.Name,
 			Email: apiOpts.Committer.Email,
@@ -698,26 +876,27 @@ func DeleteFile(ctx *context.APIContext) {
 	}
 
 	if opts.Message == "" {
-		opts.Message = ctx.Tr("repo.editor.delete", opts.TreePath)
+		opts.Message = changeFilesCommitMessage(ctx, opts.Files)
 	}
 
-	if fileResponse, err := files_service.DeleteRepoFile(ctx, ctx.Repo.Repository, ctx.Doer, opts); err != nil {
-		if git.IsErrBranchNotExist(err) || models.IsErrRepoFileDoesNotExist(err) || git.IsErrNotExist(err) {
+	if filesResponse, err := files_service.ChangeRepoFiles(ctx, ctx.Repo.Repository, ctx.Doer, opts); err != nil {
+		if git.IsErrBranchNotExist(err) || files_service.IsErrRepoFileDoesNotExist(err) || git.IsErrNotExist(err) {
 			ctx.Error(http.StatusNotFound, "DeleteFile", err)
 			return
-		} else if models.IsErrBranchAlreadyExists(err) ||
-			models.IsErrFilenameInvalid(err) ||
-			models.IsErrSHADoesNotMatch(err) ||
-			models.IsErrCommitIDDoesNotMatch(err) ||
-			models.IsErrSHAOrCommitIDNotProvided(err) {
+		} else if git_model.IsErrBranchAlreadyExists(err) ||
+			files_service.IsErrFilenameInvalid(err) ||
+			pull_service.IsErrSHADoesNotMatch(err) ||
+			files_service.IsErrCommitIDDoesNotMatch(err) ||
+			files_service.IsErrSHAOrCommitIDNotProvided(err) {
 			ctx.Error(http.StatusBadRequest, "DeleteFile", err)
 			return
-		} else if models.IsErrUserCannotCommit(err) {
+		} else if files_service.IsErrUserCannotCommit(err) {
 			ctx.Error(http.StatusForbidden, "DeleteFile", err)
 			return
 		}
 		ctx.Error(http.StatusInternalServerError, "DeleteFile", err)
 	} else {
+		fileResponse := files_service.GetFileResponseFromFilesResponse(filesResponse, 0)
 		ctx.JSON(http.StatusOK, fileResponse) // FIXME on APIv2: return http.StatusNoContent
 	}
 }
@@ -764,7 +943,7 @@ func GetContents(ctx *context.APIContext) {
 		return
 	}
 
-	treePath := ctx.Params("*")
+	treePath := ctx.PathParam("*")
 	ref := ctx.FormTrim("ref")
 
 	if fileList, err := files_service.GetContentsOrList(ctx, ctx.Repo.Repository, treePath, ref); err != nil {

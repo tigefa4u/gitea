@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path"
 	"sync"
 	"testing"
@@ -31,7 +30,7 @@ func TestRepoCommits(t *testing.T) {
 	resp := session.MakeRequest(t, req, http.StatusOK)
 
 	doc := NewHTMLParser(t, resp.Body)
-	commitURL, exists := doc.doc.Find("#commits-table tbody tr td.sha a").Attr("href")
+	commitURL, exists := doc.doc.Find("#commits-table .commit-id-short").Attr("href")
 	assert.True(t, exists)
 	assert.NotEmpty(t, commitURL)
 }
@@ -47,12 +46,12 @@ func doTestRepoCommitWithStatus(t *testing.T, state string, classes ...string) {
 
 	doc := NewHTMLParser(t, resp.Body)
 	// Get first commit URL
-	commitURL, exists := doc.doc.Find("#commits-table tbody tr td.sha a").Attr("href")
+	commitURL, exists := doc.doc.Find("#commits-table .commit-id-short").Attr("href")
 	assert.True(t, exists)
 	assert.NotEmpty(t, commitURL)
 
 	// Call API to add status for commit
-	ctx := NewAPITestContext(t, "user2", "repo1", auth_model.AccessTokenScopeRepo)
+	ctx := NewAPITestContext(t, "user2", "repo1", auth_model.AccessTokenScopeWriteRepository)
 	t.Run("CreateStatus", doAPICreateCommitStatus(ctx, path.Base(commitURL), api.CreateStatusOption{
 		State:       api.CommitStatusState(state),
 		TargetURL:   "http://test.ci/",
@@ -65,7 +64,7 @@ func doTestRepoCommitWithStatus(t *testing.T, state string, classes ...string) {
 
 	doc = NewHTMLParser(t, resp.Body)
 	// Check if commit status is displayed in message column (.tippy-target to ignore the tippy trigger)
-	sel := doc.doc.Find("#commits-table tbody tr td.message .tippy-target .commit-status")
+	sel := doc.doc.Find("#commits-table .message .tippy-target .commit-status")
 	assert.Equal(t, 1, sel.Length())
 	for _, class := range classes {
 		assert.True(t, sel.HasClass(class))
@@ -111,7 +110,7 @@ func testRepoCommitsWithStatus(t *testing.T, resp, respOne *httptest.ResponseRec
 }
 
 func TestRepoCommitsWithStatusPending(t *testing.T) {
-	doTestRepoCommitWithStatus(t, "pending", "octicon-dot-fill", "grey")
+	doTestRepoCommitWithStatus(t, "pending", "octicon-dot-fill", "yellow")
 }
 
 func TestRepoCommitsWithStatusSuccess(t *testing.T) {
@@ -130,14 +129,7 @@ func TestRepoCommitsWithStatusWarning(t *testing.T) {
 	doTestRepoCommitWithStatus(t, "warning", "gitea-exclamation", "yellow")
 }
 
-func TestRepoCommitsWithStatusRunning(t *testing.T) {
-	doTestRepoCommitWithStatus(t, "running", "octicon-dot-fill", "yellow")
-}
-
 func TestRepoCommitsStatusParallel(t *testing.T) {
-	if os.Getenv("CI") != "" {
-		t.Skip("Skipping because test is flaky on CI")
-	}
 	defer tests.PrepareTestEnv(t)()
 
 	session := loginUser(t, "user2")
@@ -148,7 +140,7 @@ func TestRepoCommitsStatusParallel(t *testing.T) {
 
 	doc := NewHTMLParser(t, resp.Body)
 	// Get first commit URL
-	commitURL, exists := doc.doc.Find("#commits-table tbody tr td.sha a").Attr("href")
+	commitURL, exists := doc.doc.Find("#commits-table .commit-id-short").Attr("href")
 	assert.True(t, exists)
 	assert.NotEmpty(t, commitURL)
 
@@ -157,7 +149,7 @@ func TestRepoCommitsStatusParallel(t *testing.T) {
 		wg.Add(1)
 		go func(parentT *testing.T, i int) {
 			parentT.Run(fmt.Sprintf("ParallelCreateStatus_%d", i), func(t *testing.T) {
-				ctx := NewAPITestContext(t, "user2", "repo1", auth_model.AccessTokenScopeRepoStatus)
+				ctx := NewAPITestContext(t, "user2", "repo1", auth_model.AccessTokenScopeWriteRepository)
 				runBody := doAPICreateCommitStatus(ctx, path.Base(commitURL), api.CreateStatusOption{
 					State:       api.CommitStatusPending,
 					TargetURL:   "http://test.ci/",
@@ -183,12 +175,12 @@ func TestRepoCommitsStatusMultiple(t *testing.T) {
 
 	doc := NewHTMLParser(t, resp.Body)
 	// Get first commit URL
-	commitURL, exists := doc.doc.Find("#commits-table tbody tr td.sha a").Attr("href")
+	commitURL, exists := doc.doc.Find("#commits-table .commit-id-short").Attr("href")
 	assert.True(t, exists)
 	assert.NotEmpty(t, commitURL)
 
 	// Call API to add status for commit
-	ctx := NewAPITestContext(t, "user2", "repo1", auth_model.AccessTokenScopeRepo)
+	ctx := NewAPITestContext(t, "user2", "repo1", auth_model.AccessTokenScopeWriteRepository)
 	t.Run("CreateStatus", doAPICreateCommitStatus(ctx, path.Base(commitURL), api.CreateStatusOption{
 		State:       api.CommitStatusSuccess,
 		TargetURL:   "http://test.ci/",
@@ -208,6 +200,6 @@ func TestRepoCommitsStatusMultiple(t *testing.T) {
 
 	doc = NewHTMLParser(t, resp.Body)
 	// Check that the data-tippy="commit-statuses" (for trigger) and commit-status (svg) are present
-	sel := doc.doc.Find("#commits-table tbody tr td.message [data-tippy=\"commit-statuses\"] .commit-status")
+	sel := doc.doc.Find("#commits-table .message [data-tippy=\"commit-statuses\"] .commit-status")
 	assert.Equal(t, 1, sel.Length())
 }

@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"code.gitea.io/gitea/modules/setting"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func Test_isGitRawOrLFSPath(t *testing.T) {
@@ -85,6 +87,10 @@ func Test_isGitRawOrLFSPath(t *testing.T) {
 			"/owner/repo/releases/download/tag/repo.tar.gz",
 			true,
 		},
+		{
+			"/owner/repo/attachments/6d92a9ee-5d8b-4993-97c9-6181bdaa8955",
+			true,
+		},
 	}
 	lfsTests := []string{
 		"/owner/repo/info/lfs/",
@@ -104,26 +110,22 @@ func Test_isGitRawOrLFSPath(t *testing.T) {
 		t.Run(tt.path, func(t *testing.T) {
 			req, _ := http.NewRequest("POST", "http://localhost"+tt.path, nil)
 			setting.LFS.StartServer = false
-			if got := isGitRawReleaseOrLFSPath(req); got != tt.want {
-				t.Errorf("isGitOrLFSPath() = %v, want %v", got, tt.want)
-			}
+			assert.Equal(t, tt.want, isGitRawOrAttachOrLFSPath(req))
+
 			setting.LFS.StartServer = true
-			if got := isGitRawReleaseOrLFSPath(req); got != tt.want {
-				t.Errorf("isGitOrLFSPath() = %v, want %v", got, tt.want)
-			}
+			assert.Equal(t, tt.want, isGitRawOrAttachOrLFSPath(req))
 		})
 	}
 	for _, tt := range lfsTests {
 		t.Run(tt, func(t *testing.T) {
 			req, _ := http.NewRequest("POST", tt, nil)
 			setting.LFS.StartServer = false
-			if got := isGitRawReleaseOrLFSPath(req); got != setting.LFS.StartServer {
-				t.Errorf("isGitOrLFSPath(%q) = %v, want %v, %v", tt, got, setting.LFS.StartServer, gitRawReleasePathRe.MatchString(tt))
-			}
+			got := isGitRawOrAttachOrLFSPath(req)
+			assert.Equalf(t, setting.LFS.StartServer, got, "isGitOrLFSPath(%q) = %v, want %v, %v", tt, got, setting.LFS.StartServer, gitRawOrAttachPathRe.MatchString(tt))
+
 			setting.LFS.StartServer = true
-			if got := isGitRawReleaseOrLFSPath(req); got != setting.LFS.StartServer {
-				t.Errorf("isGitOrLFSPath(%q) = %v, want %v", tt, got, setting.LFS.StartServer)
-			}
+			got = isGitRawOrAttachOrLFSPath(req)
+			assert.Equalf(t, setting.LFS.StartServer, got, "isGitOrLFSPath(%q) = %v, want %v", tt, got, setting.LFS.StartServer)
 		})
 	}
 	setting.LFS.StartServer = origLFSStartServer
