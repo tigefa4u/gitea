@@ -19,12 +19,14 @@ import (
 	"code.gitea.io/gitea/models/unittest"
 	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/git"
+	"code.gitea.io/gitea/modules/gitrepo"
 	"code.gitea.io/gitea/modules/graceful"
 	"code.gitea.io/gitea/modules/log"
 	base "code.gitea.io/gitea/modules/migration"
+	"code.gitea.io/gitea/modules/optional"
 	"code.gitea.io/gitea/modules/structs"
 	"code.gitea.io/gitea/modules/test"
-	"code.gitea.io/gitea/modules/util"
+	repo_service "code.gitea.io/gitea/services/repository"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -44,7 +46,7 @@ func TestGiteaUploadRepo(t *testing.T) {
 		uploader   = NewGiteaLocalUploader(graceful.GetManager().HammerContext(), user, user.Name, repoName)
 	)
 
-	err := migrateRepository(user, downloader, uploader, base.MigrateOptions{
+	err := migrateRepository(db.DefaultContext, user, downloader, uploader, base.MigrateOptions{
 		CloneAddr:    "https://github.com/go-xorm/builder",
 		RepoName:     repoName,
 		AuthUsername: "",
@@ -65,16 +67,16 @@ func TestGiteaUploadRepo(t *testing.T) {
 	assert.True(t, repo.HasWiki())
 	assert.EqualValues(t, repo_model.RepositoryReady, repo.Status)
 
-	milestones, _, err := issues_model.GetMilestones(issues_model.GetMilestonesOption{
-		RepoID: repo.ID,
-		State:  structs.StateOpen,
+	milestones, err := db.Find[issues_model.Milestone](db.DefaultContext, issues_model.FindMilestoneOptions{
+		RepoID:   repo.ID,
+		IsClosed: optional.Some(false),
 	})
 	assert.NoError(t, err)
 	assert.Len(t, milestones, 1)
 
-	milestones, _, err = issues_model.GetMilestones(issues_model.GetMilestonesOption{
-		RepoID: repo.ID,
-		State:  structs.StateClosed,
+	milestones, err = db.Find[issues_model.Milestone](db.DefaultContext, issues_model.FindMilestoneOptions{
+		RepoID:   repo.ID,
+		IsClosed: optional.Some(true),
 	})
 	assert.NoError(t, err)
 	assert.Empty(t, milestones)
@@ -83,29 +85,31 @@ func TestGiteaUploadRepo(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Len(t, labels, 12)
 
-	releases, err := repo_model.GetReleasesByRepoID(db.DefaultContext, repo.ID, repo_model.FindReleasesOptions{
+	releases, err := db.Find[repo_model.Release](db.DefaultContext, repo_model.FindReleasesOptions{
 		ListOptions: db.ListOptions{
 			PageSize: 10,
 			Page:     0,
 		},
 		IncludeTags: true,
+		RepoID:      repo.ID,
 	})
 	assert.NoError(t, err)
 	assert.Len(t, releases, 8)
 
-	releases, err = repo_model.GetReleasesByRepoID(db.DefaultContext, repo.ID, repo_model.FindReleasesOptions{
+	releases, err = db.Find[repo_model.Release](db.DefaultContext, repo_model.FindReleasesOptions{
 		ListOptions: db.ListOptions{
 			PageSize: 10,
 			Page:     0,
 		},
 		IncludeTags: false,
+		RepoID:      repo.ID,
 	})
 	assert.NoError(t, err)
 	assert.Len(t, releases, 1)
 
 	issues, err := issues_model.Issues(db.DefaultContext, &issues_model.IssuesOptions{
 		RepoIDs:  []int64{repo.ID},
-		IsPull:   util.OptionalBoolFalse,
+		IsPull:   optional.Some(false),
 		SortType: "oldest",
 	})
 	assert.NoError(t, err)
@@ -113,7 +117,7 @@ func TestGiteaUploadRepo(t *testing.T) {
 	assert.NoError(t, issues[0].LoadDiscussComments(db.DefaultContext))
 	assert.Empty(t, issues[0].Comments)
 
-	pulls, _, err := issues_model.PullRequests(repo.ID, &issues_model.PullRequestsOptions{
+	pulls, _, err := issues_model.PullRequests(db.DefaultContext, repo.ID, &issues_model.PullRequestsOptions{
 		SortType: "oldest",
 	})
 	assert.NoError(t, err)
@@ -128,8 +132,9 @@ func TestGiteaUploadRemapLocalUser(t *testing.T) {
 	doer := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 1})
 	user := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})
 
+	ctx := context.Background()
 	repoName := "migrated"
-	uploader := NewGiteaLocalUploader(context.Background(), doer, doer.Name, repoName)
+	uploader := NewGiteaLocalUploader(ctx, doer, doer.Name, repoName)
 	// call remapLocalUser
 	uploader.sameApp = true
 
@@ -146,7 +151,7 @@ func TestGiteaUploadRemapLocalUser(t *testing.T) {
 	//
 	target := repo_model.Release{}
 	uploader.userMap = make(map[int64]int64)
-	err := uploader.remapUser(&source, &target)
+	err := uploader.remapUser(ctx, &source, &target)
 	assert.NoError(t, err)
 	assert.EqualValues(t, doer.ID, target.GetUserID())
 
@@ -157,7 +162,7 @@ func TestGiteaUploadRemapLocalUser(t *testing.T) {
 	source.PublisherID = user.ID
 	target = repo_model.Release{}
 	uploader.userMap = make(map[int64]int64)
-	err = uploader.remapUser(&source, &target)
+	err = uploader.remapUser(ctx, &source, &target)
 	assert.NoError(t, err)
 	assert.EqualValues(t, doer.ID, target.GetUserID())
 
@@ -168,7 +173,7 @@ func TestGiteaUploadRemapLocalUser(t *testing.T) {
 	source.PublisherName = user.Name
 	target = repo_model.Release{}
 	uploader.userMap = make(map[int64]int64)
-	err = uploader.remapUser(&source, &target)
+	err = uploader.remapUser(ctx, &source, &target)
 	assert.NoError(t, err)
 	assert.EqualValues(t, user.ID, target.GetUserID())
 }
@@ -176,9 +181,9 @@ func TestGiteaUploadRemapLocalUser(t *testing.T) {
 func TestGiteaUploadRemapExternalUser(t *testing.T) {
 	unittest.PrepareTestEnv(t)
 	doer := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 1})
-
+	ctx := context.Background()
 	repoName := "migrated"
-	uploader := NewGiteaLocalUploader(context.Background(), doer, doer.Name, repoName)
+	uploader := NewGiteaLocalUploader(ctx, doer, doer.Name, repoName)
 	uploader.gitServiceType = structs.GiteaService
 	// call remapExternalUser
 	uploader.sameApp = false
@@ -196,7 +201,7 @@ func TestGiteaUploadRemapExternalUser(t *testing.T) {
 	//
 	uploader.userMap = make(map[int64]int64)
 	target := repo_model.Release{}
-	err := uploader.remapUser(&source, &target)
+	err := uploader.remapUser(ctx, &source, &target)
 	assert.NoError(t, err)
 	assert.EqualValues(t, doer.ID, target.GetUserID())
 
@@ -210,7 +215,7 @@ func TestGiteaUploadRemapExternalUser(t *testing.T) {
 		LoginSourceID: 0,
 		Provider:      structs.GiteaService.Name(),
 	}
-	err = user_model.LinkExternalToUser(linkedUser, externalLoginUser)
+	err = user_model.LinkExternalToUser(db.DefaultContext, linkedUser, externalLoginUser)
 	assert.NoError(t, err)
 
 	//
@@ -219,7 +224,7 @@ func TestGiteaUploadRemapExternalUser(t *testing.T) {
 	//
 	uploader.userMap = make(map[int64]int64)
 	target = repo_model.Release{}
-	err = uploader.remapUser(&source, &target)
+	err = uploader.remapUser(ctx, &source, &target)
 	assert.NoError(t, err)
 	assert.EqualValues(t, linkedUser.ID, target.GetUserID())
 }
@@ -232,7 +237,7 @@ func TestGiteaUploadUpdateGitForPullRequest(t *testing.T) {
 	//
 	fromRepo := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 1})
 	baseRef := "master"
-	assert.NoError(t, git.InitRepository(git.DefaultContext, fromRepo.RepoPath(), false))
+	assert.NoError(t, git.InitRepository(git.DefaultContext, fromRepo.RepoPath(), false, fromRepo.ObjectFormatName))
 	err := git.NewCommand(git.DefaultContext, "symbolic-ref").AddDynamicArguments("HEAD", git.BranchPrefix+baseRef).Run(&git.RunOpts{Dir: fromRepo.RepoPath()})
 	assert.NoError(t, err)
 	assert.NoError(t, os.WriteFile(filepath.Join(fromRepo.RepoPath(), "README.md"), []byte(fmt.Sprintf("# Testing Repository\n\nOriginally created in: %s", fromRepo.RepoPath())), 0o644))
@@ -247,7 +252,7 @@ func TestGiteaUploadUpdateGitForPullRequest(t *testing.T) {
 		Author:    &signature,
 		Message:   "Initial Commit",
 	}))
-	fromGitRepo, err := git.OpenRepository(git.DefaultContext, fromRepo.RepoPath())
+	fromGitRepo, err := gitrepo.OpenRepository(git.DefaultContext, fromRepo)
 	assert.NoError(t, err)
 	defer fromGitRepo.Close()
 	baseSHA, err := fromGitRepo.GetBranchCommitID(baseRef)
@@ -290,16 +295,19 @@ func TestGiteaUploadUpdateGitForPullRequest(t *testing.T) {
 		Author:    &signature,
 		Message:   "branch2 commit",
 	}))
-	forkGitRepo, err := git.OpenRepository(git.DefaultContext, forkRepo.RepoPath())
+	forkGitRepo, err := gitrepo.OpenRepository(git.DefaultContext, forkRepo)
 	assert.NoError(t, err)
 	defer forkGitRepo.Close()
 	forkHeadSHA, err := forkGitRepo.GetBranchCommitID(forkHeadRef)
 	assert.NoError(t, err)
 
 	toRepoName := "migrated"
-	uploader := NewGiteaLocalUploader(context.Background(), fromRepoOwner, fromRepoOwner.Name, toRepoName)
+	ctx := context.Background()
+	uploader := NewGiteaLocalUploader(ctx, fromRepoOwner, fromRepoOwner.Name, toRepoName)
 	uploader.gitServiceType = structs.GiteaService
-	assert.NoError(t, uploader.CreateRepo(&base.Repository{
+
+	assert.NoError(t, repo_service.Init(context.Background()))
+	assert.NoError(t, uploader.CreateRepo(ctx, &base.Repository{
 		Description: "description",
 		OriginalURL: fromRepo.RepoPath(),
 		CloneURL:    fromRepo.RepoPath(),
@@ -499,7 +507,7 @@ func TestGiteaUploadUpdateGitForPullRequest(t *testing.T) {
 
 			testCase.pr.EnsuredSafe = true
 
-			head, err := uploader.updateGitForPullRequest(&testCase.pr)
+			head, err := uploader.updateGitForPullRequest(ctx, &testCase.pr)
 			assert.NoError(t, err)
 			assert.EqualValues(t, testCase.head, head)
 

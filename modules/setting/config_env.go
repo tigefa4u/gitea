@@ -4,19 +4,39 @@
 package setting
 
 import (
+	"bytes"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
 
 	"code.gitea.io/gitea/modules/log"
+)
 
-	"gopkg.in/ini.v1"
+const (
+	EnvConfigKeyPrefixGitea = "GITEA__"
+	EnvConfigKeySuffixFile  = "__FILE"
 )
 
 const escapeRegexpString = "_0[xX](([0-9a-fA-F][0-9a-fA-F])+)_"
 
 var escapeRegex = regexp.MustCompile(escapeRegexpString)
+
+func CollectEnvConfigKeys() (keys []string) {
+	for _, env := range os.Environ() {
+		if strings.HasPrefix(env, EnvConfigKeyPrefixGitea) {
+			k, _, _ := strings.Cut(env, "=")
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+func ClearEnvConfigKeys() {
+	for _, k := range CollectEnvConfigKeys() {
+		_ = os.Unsetenv(k)
+	}
+}
 
 // decodeEnvSectionKey will decode a portable string encoded Section__Key pair
 // Portable strings are considered to be of the form [A-Z0-9_]*
@@ -67,7 +87,7 @@ func decodeEnvSectionKey(encoded string) (ok bool, section, key string) {
 		key += remaining
 	}
 	section = strings.ToLower(section)
-	ok = section != "" && key != ""
+	ok = key != ""
 	if !ok {
 		section = ""
 		key = ""
@@ -77,7 +97,7 @@ func decodeEnvSectionKey(encoded string) (ok bool, section, key string) {
 
 // decodeEnvironmentKey decode the environment key to section and key
 // The environment key is in the form of GITEA__SECTION__KEY or GITEA__SECTION__KEY__FILE
-func decodeEnvironmentKey(prefixGitea, suffixFile, envKey string) (ok bool, section, key string, useFileValue bool) {
+func decodeEnvironmentKey(prefixGitea, suffixFile, envKey string) (ok bool, section, key string, useFileValue bool) { //nolint:unparam
 	if !strings.HasPrefix(envKey, prefixGitea) {
 		return false, "", "", false
 	}
@@ -89,7 +109,7 @@ func decodeEnvironmentKey(prefixGitea, suffixFile, envKey string) (ok bool, sect
 	return ok, section, key, useFileValue
 }
 
-func EnvironmentToConfig(cfg *ini.File, prefixGitea, suffixFile string, envs []string) (changed bool) {
+func EnvironmentToConfig(cfg ConfigProvider, envs []string) (changed bool) {
 	for _, kv := range envs {
 		idx := strings.IndexByte(kv, '=')
 		if idx < 0 {
@@ -99,7 +119,7 @@ func EnvironmentToConfig(cfg *ini.File, prefixGitea, suffixFile string, envs []s
 		// parse the environment variable to config section name and key name
 		envKey := kv[:idx]
 		envValue := kv[idx+1:]
-		ok, sectionName, keyName, useFileValue := decodeEnvironmentKey(prefixGitea, suffixFile, envKey)
+		ok, sectionName, keyName, useFileValue := decodeEnvironmentKey(EnvConfigKeyPrefixGitea, EnvConfigKeySuffixFile, envKey)
 		if !ok {
 			continue
 		}
@@ -111,6 +131,11 @@ func EnvironmentToConfig(cfg *ini.File, prefixGitea, suffixFile string, envs []s
 			if err != nil {
 				log.Error("Error reading file for %s : %v", envKey, envValue, err)
 				continue
+			}
+			if bytes.HasSuffix(fileContent, []byte("\r\n")) {
+				fileContent = fileContent[:len(fileContent)-2]
+			} else if bytes.HasSuffix(fileContent, []byte("\n")) {
+				fileContent = fileContent[:len(fileContent)-1]
 			}
 			keyValue = string(fileContent)
 		}
@@ -124,8 +149,9 @@ func EnvironmentToConfig(cfg *ini.File, prefixGitea, suffixFile string, envs []s
 				continue
 			}
 		}
-		key := section.Key(keyName)
+		key := ConfigSectionKey(section, keyName)
 		if key == nil {
+			changed = true
 			key, err = section.NewKey(keyName, keyValue)
 			if err != nil {
 				log.Error("Error creating key: %s in section: %s with value: %s : %v", keyName, sectionName, keyValue, err)
@@ -139,4 +165,26 @@ func EnvironmentToConfig(cfg *ini.File, prefixGitea, suffixFile string, envs []s
 		key.SetValue(keyValue)
 	}
 	return changed
+}
+
+// InitGiteaEnvVars initializes the environment variables for gitea
+func InitGiteaEnvVars() {
+	// Ideally Gitea should only accept the environment variables which it clearly knows instead of unsetting the ones it doesn't want,
+	// but the ideal behavior would be a breaking change, and it seems not bringing enough benefits to end users,
+	// so at the moment we could still keep "unsetting the unnecessary environments"
+
+	// HOME is managed by Gitea, Gitea's git should use "HOME/.gitconfig".
+	// But git would try "XDG_CONFIG_HOME/git/config" first if "HOME/.gitconfig" does not exist,
+	// then our git.InitFull would still write to "XDG_CONFIG_HOME/git/config" if XDG_CONFIG_HOME is set.
+	_ = os.Unsetenv("XDG_CONFIG_HOME")
+}
+
+func InitGiteaEnvVarsForTesting() {
+	InitGiteaEnvVars()
+	_ = os.Unsetenv("GIT_AUTHOR_NAME")
+	_ = os.Unsetenv("GIT_AUTHOR_EMAIL")
+	_ = os.Unsetenv("GIT_AUTHOR_DATE")
+	_ = os.Unsetenv("GIT_COMMITTER_NAME")
+	_ = os.Unsetenv("GIT_COMMITTER_EMAIL")
+	_ = os.Unsetenv("GIT_COMMITTER_DATE")
 }

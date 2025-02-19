@@ -11,68 +11,19 @@ import (
 	"strconv"
 	"strings"
 
+	"code.gitea.io/gitea/modules/optional"
+
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 )
 
-// OptionalBool a boolean that can be "null"
-type OptionalBool byte
-
-const (
-	// OptionalBoolNone a "null" boolean value
-	OptionalBoolNone OptionalBool = iota
-	// OptionalBoolTrue a "true" boolean value
-	OptionalBoolTrue
-	// OptionalBoolFalse a "false" boolean value
-	OptionalBoolFalse
-)
-
-// IsTrue return true if equal to OptionalBoolTrue
-func (o OptionalBool) IsTrue() bool {
-	return o == OptionalBoolTrue
-}
-
-// IsFalse return true if equal to OptionalBoolFalse
-func (o OptionalBool) IsFalse() bool {
-	return o == OptionalBoolFalse
-}
-
-// IsNone return true if equal to OptionalBoolNone
-func (o OptionalBool) IsNone() bool {
-	return o == OptionalBoolNone
-}
-
-// OptionalBoolOf get the corresponding OptionalBool of a bool
-func OptionalBoolOf(b bool) OptionalBool {
-	if b {
-		return OptionalBoolTrue
-	}
-	return OptionalBoolFalse
-}
-
-// OptionalBoolParse get the corresponding OptionalBool of a string using strconv.ParseBool
-func OptionalBoolParse(s string) OptionalBool {
-	b, e := strconv.ParseBool(s)
+// OptionalBoolParse get the corresponding optional.Option[bool] of a string using strconv.ParseBool
+func OptionalBoolParse(s string) optional.Option[bool] {
+	v, e := strconv.ParseBool(s)
 	if e != nil {
-		return OptionalBoolNone
+		return optional.None[bool]()
 	}
-	return OptionalBoolOf(b)
-}
-
-// Max max of two ints
-func Max(a, b int) int {
-	if a < b {
-		return b
-	}
-	return a
-}
-
-// Min min of two ints
-func Min(a, b int) int {
-	if a > b {
-		return b
-	}
-	return a
+	return optional.Some(v)
 }
 
 // IsEmptyString checks if the provided string is empty
@@ -174,7 +125,7 @@ func ToTitleCaseNoLower(s string) string {
 }
 
 // ToInt64 transform a given int into int64.
-func ToInt64(number interface{}) (int64, error) {
+func ToInt64(number any) (int64, error) {
 	var value int64
 	switch v := number.(type) {
 	case int:
@@ -216,7 +167,7 @@ func ToInt64(number interface{}) (int64, error) {
 }
 
 // ToFloat64 transform a given int into float64.
-func ToFloat64(number interface{}) (float64, error) {
+func ToFloat64(number any) (float64, error) {
 	var value float64
 	switch v := number.(type) {
 	case int:
@@ -255,4 +206,54 @@ func ToFloat64(number interface{}) (float64, error) {
 		return 0, fmt.Errorf("unable to convert %v to float64", number)
 	}
 	return value, nil
+}
+
+// ToPointer returns the pointer of a copy of any given value
+func ToPointer[T any](val T) *T {
+	return &val
+}
+
+// Iif is an "inline-if", it returns "trueVal" if "condition" is true, otherwise "falseVal"
+func Iif[T any](condition bool, trueVal, falseVal T) T {
+	if condition {
+		return trueVal
+	}
+	return falseVal
+}
+
+// IfZero returns "def" if "v" is a zero value, otherwise "v"
+func IfZero[T comparable](v, def T) T {
+	var zero T
+	if v == zero {
+		return def
+	}
+	return v
+}
+
+// OptionalArg helps the "optional argument" in Golang:
+//
+//	func foo(optArg ...int) { return OptionalArg(optArg) }
+//		calling `foo()` gets zero value 0, calling `foo(100)` gets 100
+//	func bar(optArg ...int) { return OptionalArg(optArg, 42) }
+//		calling `bar()` gets default value 42, calling `bar(100)` gets 100
+//
+// Passing more than 1 item to `optArg` or `defaultValue` is undefined behavior.
+// At the moment only the first item is used.
+func OptionalArg[T any](optArg []T, defaultValue ...T) (ret T) {
+	if len(optArg) >= 1 {
+		return optArg[0]
+	}
+	if len(defaultValue) >= 1 {
+		return defaultValue[0]
+	}
+	return ret
+}
+
+func ReserveLineBreakForTextarea(input string) string {
+	// Since the content is from a form which is a textarea, the line endings are \r\n.
+	// It's a standard behavior of HTML.
+	// But we want to store them as \n like what GitHub does.
+	// And users are unlikely to really need to keep the \r.
+	// Other than this, we should respect the original content, even leading or trailing spaces.
+	return strings.ReplaceAll(input, "\r\n", "\n")
 }

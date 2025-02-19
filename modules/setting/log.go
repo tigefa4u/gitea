@@ -165,7 +165,7 @@ func loadLogModeByName(rootCfg ConfigProvider, loggerName, modeName string) (wri
 		writerMode.WriterOption = writerOption
 	default:
 		if !log.HasEventWriter(writerType) {
-			return "", "", writerMode, fmt.Errorf("invalid log writer type (mode): %s", writerType)
+			return "", "", writerMode, fmt.Errorf("invalid log writer type (mode): %s, maybe it needs something like 'MODE=file' in [log.%s] section", writerType, modeName)
 		}
 	}
 
@@ -185,13 +185,22 @@ func InitLoggersForTest() {
 	initAllLoggers()
 }
 
+var initLoggerDisabled bool
+
 // initAllLoggers creates all the log services
 func initAllLoggers() {
+	if initLoggerDisabled {
+		return
+	}
 	initManagedLoggers(log.GetManager(), CfgProvider)
 
 	golog.SetFlags(0)
 	golog.SetPrefix("")
 	golog.SetOutput(log.LoggerToWriter(log.GetLogger(log.DEFAULT).Info))
+}
+
+func DisableLoggerInit() {
+	initLoggerDisabled = true
 }
 
 func initManagedLoggers(manager *log.LoggerManager, cfg ConfigProvider) {
@@ -244,7 +253,7 @@ func initLoggerByName(manager *log.LoggerManager, rootCfg ConfigProvider, logger
 		eventWriters = append(eventWriters, eventWriter)
 	}
 
-	manager.GetLogger(loggerName).RemoveAllWriters().AddWriters(eventWriters...)
+	manager.GetLogger(loggerName).ReplaceAllWriters(eventWriters...)
 }
 
 func InitSQLLoggersForCli(level log.Level) {

@@ -4,13 +4,12 @@
 package user
 
 import (
-	"strings"
 	"time"
 
 	"code.gitea.io/gitea/models/avatars"
 	user_model "code.gitea.io/gitea/models/user"
-	"code.gitea.io/gitea/modules/context"
 	"code.gitea.io/gitea/modules/httpcache"
+	"code.gitea.io/gitea/services/context"
 )
 
 func cacheableRedirect(ctx *context.Context, location string) {
@@ -21,33 +20,24 @@ func cacheableRedirect(ctx *context.Context, location string) {
 	ctx.Redirect(location)
 }
 
-// AvatarByUserName redirect browser to user avatar of requested size
-func AvatarByUserName(ctx *context.Context) {
-	userName := ctx.Params(":username")
-	size := int(ctx.ParamsInt64(":size"))
-
-	var user *user_model.User
-	if strings.ToLower(userName) != "ghost" {
+// AvatarByUsernameSize redirect browser to user avatar of requested size
+func AvatarByUsernameSize(ctx *context.Context) {
+	username := ctx.PathParam("username")
+	user := user_model.GetSystemUserByName(username)
+	if user == nil {
 		var err error
-		if user, err = user_model.GetUserByName(ctx, userName); err != nil {
-			if user_model.IsErrUserNotExist(err) {
-				ctx.NotFound("GetUserByName", err)
-				return
-			}
-			ctx.ServerError("Invalid user: "+userName, err)
+		if user, err = user_model.GetUserByName(ctx, username); err != nil {
+			ctx.NotFoundOrServerError("GetUserByName", user_model.IsErrUserNotExist, err)
 			return
 		}
-	} else {
-		user = user_model.NewGhostUser()
 	}
-
-	cacheableRedirect(ctx, user.AvatarLinkWithSize(ctx, size))
+	cacheableRedirect(ctx, user.AvatarLinkWithSize(ctx, int(ctx.PathParamInt64("size"))))
 }
 
 // AvatarByEmailHash redirects the browser to the email avatar link
 func AvatarByEmailHash(ctx *context.Context) {
-	hash := ctx.Params(":hash")
-	email, err := avatars.GetEmailForHash(hash)
+	hash := ctx.PathParam("hash")
+	email, err := avatars.GetEmailForHash(ctx, hash)
 	if err != nil {
 		ctx.ServerError("invalid avatar hash: "+hash, err)
 		return

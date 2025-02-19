@@ -11,9 +11,9 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestServeContentByReader(t *testing.T) {
@@ -72,13 +72,11 @@ func TestServeContentByReadSeeker(t *testing.T) {
 		}
 
 		seekReader, err := os.OpenFile(tmpFile, os.O_RDONLY, 0o644)
-		if !assert.NoError(t, err) {
-			return
-		}
+		require.NoError(t, err)
 		defer seekReader.Close()
 
 		w := httptest.NewRecorder()
-		ServeContentByReadSeeker(r, w, "test", time.Time{}, seekReader)
+		ServeContentByReadSeeker(r, w, "test", nil, seekReader)
 		assert.Equal(t, expectedStatusCode, w.Code)
 		if expectedStatusCode == http.StatusPartialContent || expectedStatusCode == http.StatusOK {
 			assert.Equal(t, fmt.Sprint(len(expectedContent)), w.Header().Get("Content-Length"))

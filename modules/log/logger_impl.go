@@ -5,6 +5,7 @@ package log
 
 import (
 	"context"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -96,7 +97,10 @@ func (l *LoggerImpl) removeWriterInternal(w EventWriter) {
 func (l *LoggerImpl) AddWriters(writer ...EventWriter) {
 	l.eventWriterMu.Lock()
 	defer l.eventWriterMu.Unlock()
+	l.addWritersInternal(writer...)
+}
 
+func (l *LoggerImpl) addWritersInternal(writer ...EventWriter) {
 	for _, w := range writer {
 		if old, ok := l.eventWriters[w.GetWriterName()]; ok {
 			l.removeWriterInternal(old)
@@ -126,8 +130,8 @@ func (l *LoggerImpl) RemoveWriter(modeName string) error {
 	return nil
 }
 
-// RemoveAllWriters removes all writers from the logger, non-shared writers are closed and flushed
-func (l *LoggerImpl) RemoveAllWriters() *LoggerImpl {
+// ReplaceAllWriters replaces all writers from the logger, non-shared writers are closed and flushed
+func (l *LoggerImpl) ReplaceAllWriters(writer ...EventWriter) {
 	l.eventWriterMu.Lock()
 	defer l.eventWriterMu.Unlock()
 
@@ -135,8 +139,7 @@ func (l *LoggerImpl) RemoveAllWriters() *LoggerImpl {
 		l.removeWriterInternal(w)
 	}
 	l.eventWriters = map[string]EventWriter{}
-	l.syncLevelInternal()
-	return l
+	l.addWritersInternal(writer...)
 }
 
 // DumpWriters dumps the writers as a JSON map, it's used for debugging and display purposes.
@@ -161,7 +164,7 @@ func (l *LoggerImpl) DumpWriters() map[string]any {
 
 // Close closes the logger, non-shared writers are closed and flushed
 func (l *LoggerImpl) Close() {
-	l.RemoveAllWriters()
+	l.ReplaceAllWriters()
 	l.ctxCancel()
 }
 
@@ -171,6 +174,20 @@ func (l *LoggerImpl) IsEnabled() bool {
 	l.eventWriterMu.RLock()
 	defer l.eventWriterMu.RUnlock()
 	return l.level.Load() < int32(FATAL) && len(l.eventWriters) > 0
+}
+
+func asLogStringer(v any) LogStringer {
+	if s, ok := v.(LogStringer); ok {
+		return s
+	} else if a := reflect.ValueOf(v); a.Kind() == reflect.Struct {
+		// in case the receiver is a pointer, but the value is a struct
+		vp := reflect.New(a.Type())
+		vp.Elem().Set(a)
+		if s, ok := vp.Interface().(LogStringer); ok {
+			return s
+		}
+	}
+	return nil
 }
 
 // Log prepares the log event, if the level matches, the event will be sent to the writers
@@ -198,11 +215,6 @@ func (l *LoggerImpl) Log(skip int, level Level, format string, logArgs ...any) {
 		event.Stacktrace = Stack(skip + 1)
 	}
 
-	labels := getGoroutineLabels()
-	if labels != nil {
-		event.GoroutinePid = labels["pid"]
-	}
-
 	// get a simple text message without color
 	msgArgs := make([]any, len(logArgs))
 	copy(msgArgs, logArgs)
@@ -210,11 +222,11 @@ func (l *LoggerImpl) Log(skip int, level Level, format string, logArgs ...any) {
 	// handle LogStringer values
 	for i, v := range msgArgs {
 		if cv, ok := v.(*ColoredValue); ok {
-			if s, ok := cv.v.(LogStringer); ok {
-				cv.v = logStringFormatter{v: s}
+			if ls := asLogStringer(cv.v); ls != nil {
+				cv.v = logStringFormatter{v: ls}
 			}
-		} else if s, ok := v.(LogStringer); ok {
-			msgArgs[i] = logStringFormatter{v: s}
+		} else if ls := asLogStringer(v); ls != nil {
+			msgArgs[i] = logStringFormatter{v: ls}
 		}
 	}
 
@@ -230,10 +242,9 @@ func (l *LoggerImpl) GetLevel() Level {
 
 func NewLoggerWithWriters(ctx context.Context, name string, writer ...EventWriter) *LoggerImpl {
 	l := &LoggerImpl{}
-	l.ctx, l.ctxCancel = newContext(ctx, "Logger: "+name)
+	l.ctx, l.ctxCancel = newProcessTypedContext(ctx, "Logger: "+name)
 	l.LevelLogger = BaseLoggerToGeneralLogger(l)
 	l.eventWriters = map[string]EventWriter{}
-	l.syncLevelInternal()
 	l.AddWriters(writer...)
 	return l
 }
