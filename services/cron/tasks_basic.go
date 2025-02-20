@@ -54,7 +54,7 @@ func registerRepoHealthCheck() {
 			RunAtStart: false,
 			Schedule:   "@midnight",
 		},
-		Timeout: 60 * time.Second,
+		Timeout: time.Duration(setting.Git.Timeout.Default) * time.Second,
 		Args:    []string{},
 	}, func(ctx context.Context, _ *user_model.User, config Config) error {
 		rhcConfig := config.(*RepoHealthCheckConfig)
@@ -152,7 +152,17 @@ func registerCleanupPackages() {
 		OlderThan: 24 * time.Hour,
 	}, func(ctx context.Context, _ *user_model.User, config Config) error {
 		realConfig := config.(*OlderThanConfig)
-		return packages_cleanup_service.Cleanup(ctx, realConfig.OlderThan)
+		return packages_cleanup_service.CleanupTask(ctx, realConfig.OlderThan)
+	})
+}
+
+func registerSyncRepoLicenses() {
+	RegisterTaskFatal("sync_repo_licenses", &BaseConfig{
+		Enabled:    false,
+		RunAtStart: false,
+		Schedule:   "@annually",
+	}, func(ctx context.Context, _ *user_model.User, config Config) error {
+		return repo_service.SyncRepoLicenses(ctx)
 	})
 }
 
@@ -172,4 +182,5 @@ func initBasicTasks() {
 	if setting.Packages.Enabled {
 		registerCleanupPackages()
 	}
+	registerSyncRepoLicenses()
 }

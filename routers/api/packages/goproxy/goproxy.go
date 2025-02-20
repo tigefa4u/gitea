@@ -12,22 +12,23 @@ import (
 	"time"
 
 	packages_model "code.gitea.io/gitea/models/packages"
-	"code.gitea.io/gitea/modules/context"
+	"code.gitea.io/gitea/modules/optional"
 	packages_module "code.gitea.io/gitea/modules/packages"
 	goproxy_module "code.gitea.io/gitea/modules/packages/goproxy"
 	"code.gitea.io/gitea/modules/util"
 	"code.gitea.io/gitea/routers/api/packages/helper"
+	"code.gitea.io/gitea/services/context"
 	packages_service "code.gitea.io/gitea/services/packages"
 )
 
-func apiError(ctx *context.Context, status int, obj interface{}) {
+func apiError(ctx *context.Context, status int, obj any) {
 	helper.LogAndProcessError(ctx, status, obj, func(message string) {
 		ctx.PlainText(status, message)
 	})
 }
 
 func EnumeratePackageVersions(ctx *context.Context) {
-	pvs, err := packages_model.GetVersionsByPackageName(ctx, ctx.Package.Owner.ID, packages_model.TypeGo, ctx.Params("name"))
+	pvs, err := packages_model.GetVersionsByPackageName(ctx, ctx.Package.Owner.ID, packages_model.TypeGo, ctx.PathParam("name"))
 	if err != nil {
 		apiError(ctx, http.StatusInternalServerError, err)
 		return
@@ -49,7 +50,7 @@ func EnumeratePackageVersions(ctx *context.Context) {
 }
 
 func PackageVersionMetadata(ctx *context.Context) {
-	pv, err := resolvePackage(ctx, ctx.Package.Owner.ID, ctx.Params("name"), ctx.Params("version"))
+	pv, err := resolvePackage(ctx, ctx.Package.Owner.ID, ctx.PathParam("name"), ctx.PathParam("version"))
 	if err != nil {
 		if errors.Is(err, util.ErrNotExist) {
 			apiError(ctx, http.StatusNotFound, err)
@@ -69,7 +70,7 @@ func PackageVersionMetadata(ctx *context.Context) {
 }
 
 func PackageVersionGoModContent(ctx *context.Context) {
-	pv, err := resolvePackage(ctx, ctx.Package.Owner.ID, ctx.Params("name"), ctx.Params("version"))
+	pv, err := resolvePackage(ctx, ctx.Package.Owner.ID, ctx.PathParam("name"), ctx.PathParam("version"))
 	if err != nil {
 		if errors.Is(err, util.ErrNotExist) {
 			apiError(ctx, http.StatusNotFound, err)
@@ -89,7 +90,7 @@ func PackageVersionGoModContent(ctx *context.Context) {
 }
 
 func DownloadPackageFile(ctx *context.Context) {
-	pv, err := resolvePackage(ctx, ctx.Package.Owner.ID, ctx.Params("name"), ctx.Params("version"))
+	pv, err := resolvePackage(ctx, ctx.Package.Owner.ID, ctx.PathParam("name"), ctx.PathParam("version"))
 	if err != nil {
 		if errors.Is(err, util.ErrNotExist) {
 			apiError(ctx, http.StatusNotFound, err)
@@ -105,7 +106,7 @@ func DownloadPackageFile(ctx *context.Context) {
 		return
 	}
 
-	s, _, err := packages_service.GetPackageFileStream(ctx, pfs[0])
+	s, u, _, err := packages_service.GetPackageFileStream(ctx, pfs[0])
 	if err != nil {
 		if errors.Is(err, util.ErrNotExist) {
 			apiError(ctx, http.StatusNotFound, err)
@@ -114,12 +115,8 @@ func DownloadPackageFile(ctx *context.Context) {
 		}
 		return
 	}
-	defer s.Close()
 
-	ctx.ServeContent(s, &context.ServeHeaderOptions{
-		Filename:     pfs[0].Name,
-		LastModified: pfs[0].CreatedUnix.AsLocalTime(),
-	})
+	helper.ServePackageFile(ctx, s, u, pfs[0])
 }
 
 func resolvePackage(ctx *context.Context, ownerID int64, name, version string) (*packages_model.PackageVersion, error) {
@@ -133,7 +130,7 @@ func resolvePackage(ctx *context.Context, ownerID int64, name, version string) (
 				Value:      name,
 				ExactMatch: true,
 			},
-			IsInternal: util.OptionalBoolFalse,
+			IsInternal: optional.Some(false),
 			Sort:       packages_model.SortCreatedDesc,
 		})
 		if err != nil {
@@ -157,12 +154,12 @@ func resolvePackage(ctx *context.Context, ownerID int64, name, version string) (
 }
 
 func UploadPackage(ctx *context.Context) {
-	upload, close, err := ctx.UploadStream()
+	upload, needToClose, err := ctx.UploadStream()
 	if err != nil {
 		apiError(ctx, http.StatusInternalServerError, err)
 		return
 	}
-	if close {
+	if needToClose {
 		defer upload.Close()
 	}
 
@@ -189,6 +186,7 @@ func UploadPackage(ctx *context.Context) {
 	}
 
 	_, _, err = packages_service.CreatePackageAndAddFile(
+		ctx,
 		&packages_service.PackageCreationInfo{
 			PackageInfo: packages_service.PackageInfo{
 				Owner:       ctx.Package.Owner,

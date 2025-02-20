@@ -4,12 +4,10 @@
 package setting
 
 import (
+	"fmt"
 	"math"
-	"net/url"
 	"os"
 	"path/filepath"
-
-	"code.gitea.io/gitea/modules/log"
 
 	"github.com/dustin/go-humanize"
 )
@@ -17,14 +15,14 @@ import (
 // Package registry settings
 var (
 	Packages = struct {
-		Storage
+		Storage           *Storage
 		Enabled           bool
 		ChunkedUploadPath string
-		RegistryHost      string
 
 		LimitTotalOwnerCount int64
 		LimitTotalOwnerSize  int64
 		LimitSizeAlpine      int64
+		LimitSizeArch        int64
 		LimitSizeCargo       int64
 		LimitSizeChef        int64
 		LimitSizeComposer    int64
@@ -45,34 +43,44 @@ var (
 		LimitSizeRubyGems    int64
 		LimitSizeSwift       int64
 		LimitSizeVagrant     int64
+
+		DefaultRPMSignEnabled bool
 	}{
 		Enabled:              true,
 		LimitTotalOwnerCount: -1,
 	}
 )
 
-func loadPackagesFrom(rootCfg ConfigProvider) {
-	sec := rootCfg.Section("packages")
-	if err := sec.MapTo(&Packages); err != nil {
-		log.Fatal("Failed to map Packages settings: %v", err)
+func loadPackagesFrom(rootCfg ConfigProvider) (err error) {
+	sec, _ := rootCfg.GetSection("packages")
+	if sec == nil {
+		Packages.Storage, err = getStorage(rootCfg, "packages", "", nil)
+		return err
 	}
 
-	Packages.Storage = getStorage(rootCfg, "packages", "", nil)
+	if err = sec.MapTo(&Packages); err != nil {
+		return fmt.Errorf("failed to map Packages settings: %v", err)
+	}
 
-	appURL, _ := url.Parse(AppURL)
-	Packages.RegistryHost = appURL.Host
+	Packages.Storage, err = getStorage(rootCfg, "packages", "", sec)
+	if err != nil {
+		return err
+	}
 
 	Packages.ChunkedUploadPath = filepath.ToSlash(sec.Key("CHUNKED_UPLOAD_PATH").MustString("tmp/package-upload"))
 	if !filepath.IsAbs(Packages.ChunkedUploadPath) {
 		Packages.ChunkedUploadPath = filepath.ToSlash(filepath.Join(AppDataPath, Packages.ChunkedUploadPath))
 	}
 
-	if err := os.MkdirAll(Packages.ChunkedUploadPath, os.ModePerm); err != nil {
-		log.Error("Unable to create chunked upload directory: %s (%v)", Packages.ChunkedUploadPath, err)
+	if HasInstallLock(rootCfg) {
+		if err := os.MkdirAll(Packages.ChunkedUploadPath, os.ModePerm); err != nil {
+			return fmt.Errorf("unable to create chunked upload directory: %s (%v)", Packages.ChunkedUploadPath, err)
+		}
 	}
 
 	Packages.LimitTotalOwnerSize = mustBytes(sec, "LIMIT_TOTAL_OWNER_SIZE")
 	Packages.LimitSizeAlpine = mustBytes(sec, "LIMIT_SIZE_ALPINE")
+	Packages.LimitSizeArch = mustBytes(sec, "LIMIT_SIZE_ARCH")
 	Packages.LimitSizeCargo = mustBytes(sec, "LIMIT_SIZE_CARGO")
 	Packages.LimitSizeChef = mustBytes(sec, "LIMIT_SIZE_CHEF")
 	Packages.LimitSizeComposer = mustBytes(sec, "LIMIT_SIZE_COMPOSER")
@@ -93,6 +101,8 @@ func loadPackagesFrom(rootCfg ConfigProvider) {
 	Packages.LimitSizeRubyGems = mustBytes(sec, "LIMIT_SIZE_RUBYGEMS")
 	Packages.LimitSizeSwift = mustBytes(sec, "LIMIT_SIZE_SWIFT")
 	Packages.LimitSizeVagrant = mustBytes(sec, "LIMIT_SIZE_VAGRANT")
+	Packages.DefaultRPMSignEnabled = sec.Key("DEFAULT_RPM_SIGN_ENABLED").MustBool(false)
+	return nil
 }
 
 func mustBytes(section ConfigSection, key string) int64 {

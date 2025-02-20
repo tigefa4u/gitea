@@ -8,10 +8,10 @@ import (
 
 	"code.gitea.io/gitea/models/db"
 	issues_model "code.gitea.io/gitea/models/issues"
-	"code.gitea.io/gitea/modules/context"
 	"code.gitea.io/gitea/modules/label"
 	repo_module "code.gitea.io/gitea/modules/repository"
 	"code.gitea.io/gitea/modules/web"
+	"code.gitea.io/gitea/services/context"
 	"code.gitea.io/gitea/services/forms"
 )
 
@@ -64,7 +64,7 @@ func UpdateLabel(ctx *context.Context) {
 	if err != nil {
 		switch {
 		case issues_model.IsErrOrgLabelNotExist(err):
-			ctx.Error(http.StatusNotFound)
+			ctx.HTTPError(http.StatusNotFound)
 		default:
 			ctx.ServerError("UpdateLabel", err)
 		}
@@ -75,7 +75,8 @@ func UpdateLabel(ctx *context.Context) {
 	l.Exclusive = form.Exclusive
 	l.Description = form.Description
 	l.Color = form.Color
-	if err := issues_model.UpdateLabel(l); err != nil {
+	l.SetArchived(form.IsArchived)
+	if err := issues_model.UpdateLabel(ctx, l); err != nil {
 		ctx.ServerError("UpdateLabel", err)
 		return
 	}
@@ -84,15 +85,13 @@ func UpdateLabel(ctx *context.Context) {
 
 // DeleteLabel delete a label
 func DeleteLabel(ctx *context.Context) {
-	if err := issues_model.DeleteLabel(ctx.Org.Organization.ID, ctx.FormInt64("id")); err != nil {
+	if err := issues_model.DeleteLabel(ctx, ctx.Org.Organization.ID, ctx.FormInt64("id")); err != nil {
 		ctx.Flash.Error("DeleteLabel: " + err.Error())
 	} else {
 		ctx.Flash.Success(ctx.Tr("repo.issues.label_deletion_success"))
 	}
 
-	ctx.JSON(http.StatusOK, map[string]interface{}{
-		"redirect": ctx.Org.OrgLink + "/settings/labels",
-	})
+	ctx.JSONRedirect(ctx.Org.OrgLink + "/settings/labels")
 }
 
 // InitializeLabels init labels for an organization
