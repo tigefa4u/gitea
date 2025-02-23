@@ -12,29 +12,28 @@ import (
 	"strings"
 
 	"code.gitea.io/gitea/models/db"
+	git_model "code.gitea.io/gitea/models/git"
 	repo_model "code.gitea.io/gitea/models/repo"
 	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/container"
 	"code.gitea.io/gitea/modules/git"
+	"code.gitea.io/gitea/modules/gitrepo"
 	"code.gitea.io/gitea/modules/log"
-	"code.gitea.io/gitea/modules/notification"
+	"code.gitea.io/gitea/modules/optional"
 	repo_module "code.gitea.io/gitea/modules/repository"
 	"code.gitea.io/gitea/modules/setting"
 	"code.gitea.io/gitea/modules/util"
+	notify_service "code.gitea.io/gitea/services/notify"
 
 	"github.com/gobwas/glob"
 )
 
 // AdoptRepository adopts pre-existing repository files for the user/organization.
-func AdoptRepository(ctx context.Context, doer, u *user_model.User, opts repo_module.CreateRepoOptions) (*repo_model.Repository, error) {
+func AdoptRepository(ctx context.Context, doer, u *user_model.User, opts CreateRepoOptions) (*repo_model.Repository, error) {
 	if !doer.IsAdmin && !u.CanCreateRepo() {
 		return nil, repo_model.ErrReachLimitOfRepo{
 			Limit: u.MaxRepoCreation,
 		}
-	}
-
-	if len(opts.DefaultBranch) == 0 {
-		opts.DefaultBranch = setting.Repository.DefaultBranch
 	}
 
 	repo := &repo_model.Repository{
@@ -53,8 +52,9 @@ func AdoptRepository(ctx context.Context, doer, u *user_model.User, opts repo_mo
 		IsEmpty:                         !opts.AutoInit,
 	}
 
+	repoPath := repo_model.RepoPath(u.Name, repo.Name)
+
 	if err := db.WithTx(ctx, func(ctx context.Context) error {
-		repoPath := repo_model.RepoPath(u.Name, repo.Name)
 		isExist, err := util.IsExist(repoPath)
 		if err != nil {
 			log.Error("Unable to check if %s exists. Error: %v", repoPath, err)
@@ -67,40 +67,47 @@ func AdoptRepository(ctx context.Context, doer, u *user_model.User, opts repo_mo
 			}
 		}
 
-		if err := repo_module.CreateRepositoryByExample(ctx, doer, u, repo, true, false); err != nil {
+		if err := CreateRepositoryByExample(ctx, doer, u, repo, true, false); err != nil {
 			return err
 		}
-		if err := adoptRepository(ctx, repoPath, doer, repo, opts); err != nil {
-			return fmt.Errorf("createDelegateHooks: %w", err)
-		}
-		if err := repo_module.CheckDaemonExportOK(ctx, repo); err != nil {
-			return fmt.Errorf("checkDaemonExportOK: %w", err)
-		}
 
-		// Initialize Issue Labels if selected
-		if len(opts.IssueLabels) > 0 {
-			if err := repo_module.InitializeLabels(ctx, repo.ID, opts.IssueLabels, false); err != nil {
-				return fmt.Errorf("InitializeLabels: %w", err)
-			}
-		}
-
-		if stdout, _, err := git.NewCommand(ctx, "update-server-info").
-			SetDescription(fmt.Sprintf("CreateRepository(git update-server-info): %s", repoPath)).
-			RunStdString(&git.RunOpts{Dir: repoPath}); err != nil {
-			log.Error("CreateRepository(git update-server-info) in %v: Stdout: %s\nError: %v", repo, stdout, err)
-			return fmt.Errorf("CreateRepository(git update-server-info): %w", err)
+		// Re-fetch the repository from database before updating it (else it would
+		// override changes that were done earlier with sql)
+		if repo, err = repo_model.GetRepositoryByID(ctx, repo.ID); err != nil {
+			return fmt.Errorf("getRepositoryByID: %w", err)
 		}
 		return nil
 	}); err != nil {
 		return nil, err
 	}
 
-	notification.NotifyCreateRepository(ctx, doer, u, repo)
+	if err := func() error {
+		if err := adoptRepository(ctx, repoPath, repo, opts.DefaultBranch); err != nil {
+			return fmt.Errorf("adoptRepository: %w", err)
+		}
+
+		if err := repo_module.CheckDaemonExportOK(ctx, repo); err != nil {
+			return fmt.Errorf("checkDaemonExportOK: %w", err)
+		}
+
+		if stdout, _, err := git.NewCommand(ctx, "update-server-info").
+			RunStdString(&git.RunOpts{Dir: repoPath}); err != nil {
+			log.Error("CreateRepository(git update-server-info) in %v: Stdout: %s\nError: %v", repo, stdout, err)
+			return fmt.Errorf("CreateRepository(git update-server-info): %w", err)
+		}
+		return nil
+	}(); err != nil {
+		if errDel := DeleteRepository(ctx, doer, repo, false /* no notify */); errDel != nil {
+			log.Error("Failed to delete repository %s that could not be adopted: %v", repo.FullName(), errDel)
+		}
+		return nil, err
+	}
+	notify_service.AdoptRepository(ctx, doer, u, repo)
 
 	return repo, nil
 }
 
-func adoptRepository(ctx context.Context, repoPath string, u *user_model.User, repo *repo_model.Repository, opts repo_module.CreateRepoOptions) (err error) {
+func adoptRepository(ctx context.Context, repoPath string, repo *repo_model.Repository, defaultBranch string) (err error) {
 	isExist, err := util.IsExist(repoPath)
 	if err != nil {
 		log.Error("Unable to check if %s exists. Error: %v", repoPath, err)
@@ -114,37 +121,45 @@ func adoptRepository(ctx context.Context, repoPath string, u *user_model.User, r
 		return fmt.Errorf("createDelegateHooks: %w", err)
 	}
 
-	// Re-fetch the repository from database before updating it (else it would
-	// override changes that were done earlier with sql)
-	if repo, err = repo_model.GetRepositoryByID(ctx, repo.ID); err != nil {
-		return fmt.Errorf("getRepositoryByID: %w", err)
-	}
-
 	repo.IsEmpty = false
 
+	if len(defaultBranch) > 0 {
+		repo.DefaultBranch = defaultBranch
+
+		if err = gitrepo.SetDefaultBranch(ctx, repo, repo.DefaultBranch); err != nil {
+			return fmt.Errorf("setDefaultBranch: %w", err)
+		}
+	} else {
+		repo.DefaultBranch, err = gitrepo.GetDefaultBranch(ctx, repo)
+		if err != nil {
+			repo.DefaultBranch = setting.Repository.DefaultBranch
+			if err = gitrepo.SetDefaultBranch(ctx, repo, repo.DefaultBranch); err != nil {
+				return fmt.Errorf("setDefaultBranch: %w", err)
+			}
+		}
+	}
+
 	// Don't bother looking this repo in the context it won't be there
-	gitRepo, err := git.OpenRepository(ctx, repo.RepoPath())
+	gitRepo, err := gitrepo.OpenRepository(ctx, repo)
 	if err != nil {
 		return fmt.Errorf("openRepository: %w", err)
 	}
 	defer gitRepo.Close()
 
-	if len(opts.DefaultBranch) > 0 {
-		repo.DefaultBranch = opts.DefaultBranch
-
-		if err = gitRepo.SetDefaultBranch(repo.DefaultBranch); err != nil {
-			return fmt.Errorf("setDefaultBranch: %w", err)
-		}
-	} else {
-		repo.DefaultBranch, err = gitRepo.GetDefaultBranch()
-		if err != nil {
-			repo.DefaultBranch = setting.Repository.DefaultBranch
-			if err = gitRepo.SetDefaultBranch(repo.DefaultBranch); err != nil {
-				return fmt.Errorf("setDefaultBranch: %w", err)
-			}
-		}
+	if _, err = repo_module.SyncRepoBranchesWithRepo(ctx, repo, gitRepo, 0); err != nil {
+		return fmt.Errorf("SyncRepoBranchesWithRepo: %w", err)
 	}
-	branches, _, _ := gitRepo.GetBranchNames(0, 0)
+
+	if err = repo_module.SyncReleasesWithTags(ctx, repo, gitRepo); err != nil {
+		return fmt.Errorf("SyncReleasesWithTags: %w", err)
+	}
+
+	branches, _ := git_model.FindBranchNames(ctx, git_model.FindBranchOptions{
+		RepoID:          repo.ID,
+		ListOptions:     db.ListOptionsAll,
+		IsDeletedBranch: optional.Some(false),
+	})
+
 	found := false
 	hasDefault := false
 	hasMaster := false
@@ -175,11 +190,10 @@ func adoptRepository(ctx context.Context, repoPath string, u *user_model.User, r
 			repo.DefaultBranch = setting.Repository.DefaultBranch
 		}
 
-		if err = gitRepo.SetDefaultBranch(repo.DefaultBranch); err != nil {
+		if err = gitrepo.SetDefaultBranch(ctx, repo, repo.DefaultBranch); err != nil {
 			return fmt.Errorf("setDefaultBranch: %w", err)
 		}
 	}
-
 	if err = repo_module.UpdateRepository(ctx, repo, false); err != nil {
 		return fmt.Errorf("updateRepository: %w", err)
 	}
@@ -244,7 +258,7 @@ func checkUnadoptedRepositories(ctx context.Context, userName string, repoNamesT
 		}
 		return err
 	}
-	repos, _, err := repo_model.GetUserRepositories(&repo_model.SearchRepoOptions{
+	repos, _, err := repo_model.GetUserRepositories(ctx, &repo_model.SearchRepoOptions{
 		Actor:   ctxUser,
 		Private: true,
 		ListOptions: db.ListOptions{
@@ -342,7 +356,6 @@ func ListUnadoptedRepositories(ctx context.Context, query string, opts *db.ListO
 				return err
 			}
 			repoNamesToCheck = repoNamesToCheck[:0]
-
 		}
 		return filepath.SkipDir
 	}); err != nil {

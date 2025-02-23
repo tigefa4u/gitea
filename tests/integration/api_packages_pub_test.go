@@ -31,7 +31,7 @@ func TestPackagePub(t *testing.T) {
 
 	user := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})
 
-	token := "Bearer " + getUserToken(t, user.Name, auth_model.AccessTokenScopePackage)
+	token := "Bearer " + getUserToken(t, user.Name, auth_model.AccessTokenScopeWritePackage)
 
 	packageName := "test_package"
 	packageVersion := "1.0.1"
@@ -66,8 +66,8 @@ description: ` + packageDescription
 		req := NewRequest(t, "GET", uploadURL)
 		MakeRequest(t, req, http.StatusUnauthorized)
 
-		req = NewRequest(t, "GET", uploadURL)
-		addTokenAuthHeader(req, token)
+		req = NewRequest(t, "GET", uploadURL).
+			AddTokenAuth(token)
 		resp := MakeRequest(t, req, http.StatusOK)
 
 		type UploadRequest struct {
@@ -88,16 +88,16 @@ description: ` + packageDescription
 
 			_ = writer.Close()
 
-			req := NewRequestWithBody(t, "POST", url, body)
-			req.Header.Add("Content-Type", writer.FormDataContentType())
-			addTokenAuthHeader(req, token)
+			req := NewRequestWithBody(t, "POST", url, body).
+				SetHeader("Content-Type", writer.FormDataContentType()).
+				AddTokenAuth(token)
 			return MakeRequest(t, req, expectedStatus)
 		}
 
 		resp = uploadFile(t, result.URL, content, http.StatusNoContent)
 
-		req = NewRequest(t, "GET", resp.Header().Get("Location"))
-		addTokenAuthHeader(req, token)
+		req = NewRequest(t, "GET", resp.Header().Get("Location")).
+			AddTokenAuth(token)
 		MakeRequest(t, req, http.StatusOK)
 
 		pvs, err := packages.GetVersionsByPackageType(db.DefaultContext, user.ID, packages.TypePub)
@@ -121,7 +121,7 @@ description: ` + packageDescription
 		assert.NoError(t, err)
 		assert.Equal(t, int64(len(content)), pb.Size)
 
-		_ = uploadFile(t, result.URL, content, http.StatusBadRequest)
+		_ = uploadFile(t, result.URL, content, http.StatusConflict)
 	})
 
 	t.Run("Download", func(t *testing.T) {
@@ -131,10 +131,10 @@ description: ` + packageDescription
 		resp := MakeRequest(t, req, http.StatusOK)
 
 		type VersionMetadata struct {
-			Version    string      `json:"version"`
-			ArchiveURL string      `json:"archive_url"`
-			Published  time.Time   `json:"published"`
-			Pubspec    interface{} `json:"pubspec,omitempty"`
+			Version    string    `json:"version"`
+			ArchiveURL string    `json:"archive_url"`
+			Published  time.Time `json:"published"`
+			Pubspec    any       `json:"pubspec,omitempty"`
 		}
 
 		var result VersionMetadata
@@ -156,10 +156,10 @@ description: ` + packageDescription
 		resp := MakeRequest(t, req, http.StatusOK)
 
 		type VersionMetadata struct {
-			Version    string      `json:"version"`
-			ArchiveURL string      `json:"archive_url"`
-			Published  time.Time   `json:"published"`
-			Pubspec    interface{} `json:"pubspec,omitempty"`
+			Version    string    `json:"version"`
+			ArchiveURL string    `json:"archive_url"`
+			Published  time.Time `json:"published"`
+			Pubspec    any       `json:"pubspec,omitempty"`
 		}
 
 		type PackageVersions struct {

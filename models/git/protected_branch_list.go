@@ -8,7 +8,7 @@ import (
 	"sort"
 
 	"code.gitea.io/gitea/models/db"
-	"code.gitea.io/gitea/modules/git"
+	"code.gitea.io/gitea/modules/optional"
 
 	"github.com/gobwas/glob"
 )
@@ -28,6 +28,13 @@ func (rules ProtectedBranchRules) sort() {
 	sort.Slice(rules, func(i, j int) bool {
 		rules[i].loadGlob()
 		rules[j].loadGlob()
+
+		// if priority differ, use that to sort
+		if rules[i].Priority != rules[j].Priority {
+			return rules[i].Priority < rules[j].Priority
+		}
+
+		// now we sort the old way
 		if rules[i].isPlainName != rules[j].isPlainName {
 			return rules[i].isPlainName // plain name comes first, so plain name means "less"
 		}
@@ -47,19 +54,32 @@ func FindRepoProtectedBranchRules(ctx context.Context, repoID int64) (ProtectedB
 }
 
 // FindAllMatchedBranches find all matched branches
-func FindAllMatchedBranches(ctx context.Context, gitRepo *git.Repository, ruleName string) ([]string, error) {
-	// FIXME: how many should we get?
-	branches, _, err := gitRepo.GetBranchNames(0, 9999999)
-	if err != nil {
-		return nil, err
-	}
-	rule := glob.MustCompile(ruleName)
-	results := make([]string, 0, len(branches))
-	for _, branch := range branches {
-		if rule.Match(branch) {
-			results = append(results, branch)
+func FindAllMatchedBranches(ctx context.Context, repoID int64, ruleName string) ([]string, error) {
+	results := make([]string, 0, 10)
+	for page := 1; ; page++ {
+		brancheNames, err := FindBranchNames(ctx, FindBranchOptions{
+			ListOptions: db.ListOptions{
+				PageSize: 100,
+				Page:     page,
+			},
+			RepoID:          repoID,
+			IsDeletedBranch: optional.Some(false),
+		})
+		if err != nil {
+			return nil, err
+		}
+		rule := glob.MustCompile(ruleName)
+
+		for _, branch := range brancheNames {
+			if rule.Match(branch) {
+				results = append(results, branch)
+			}
+		}
+		if len(brancheNames) < 100 {
+			break
 		}
 	}
+
 	return results, nil
 }
 

@@ -6,16 +6,15 @@ package forms
 import (
 	"net/http"
 
-	"code.gitea.io/gitea/modules/context"
 	"code.gitea.io/gitea/modules/web/middleware"
+	"code.gitea.io/gitea/services/context"
 
 	"gitea.com/go-chi/binding"
 )
 
 // EditRunnerForm form for admin to create runner
 type EditRunnerForm struct {
-	Description  string
-	CustomLabels string // comma-separated
+	Description string
 }
 
 // Validate validates form fields

@@ -22,7 +22,7 @@ func onGiteaRunTB(t testing.TB, callback func(testing.TB, *url.URL), prepare ...
 		defer tests.PrepareTestEnv(t, 1)()
 	}
 	s := http.Server{
-		Handler: c,
+		Handler: testE2eWebRoutes,
 	}
 
 	u, err := url.Parse(setting.AppURL)
@@ -38,7 +38,7 @@ func onGiteaRunTB(t testing.TB, callback func(testing.TB, *url.URL), prepare ...
 	u.Host = listener.Addr().String()
 
 	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 		s.Shutdown(ctx)
 		cancel()
 	}()
